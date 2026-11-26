@@ -1,0 +1,17 @@
+{
+  "name": "cookie-tin",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Cookie recipe box, bake-day planner and shopping list, with Claude reading recipes from links, photos and text.",
+  "type": "module",
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "1.14.0",
+    "express": "5.3.0",
+    "zod": "3.25.76"
+  }
+}
