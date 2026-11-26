@@ -172,8 +172,10 @@ const isPlainObject = (v) => v && typeof v === "object" && !Array.isArray(v);
 app.put("/api/recipes/:id", (req, res) => {
   const { id } = req.params;
   if (!ID_RE.test(id) || !isPlainObject(req.body)) return res.status(400).json({ error: "That recipe couldn't be saved." });
-  const { images: _ignored, ...body } = req.body;
-  const rec = { ...body, id };
+  const { images: _ignored, notes: _notes, ...body } = req.body;
+  // Notes are added and removed through their own routes, so editing a recipe never drops someone's new note.
+  const prev = db.prepare("SELECT data FROM recipes WHERE id = ?").get(id);
+  const rec = { ...body, id, notes: prev ? JSON.parse(prev.data).notes || [] : [] };
   if (!String(rec.name || "").trim()) return res.status(400).json({ error: "Give the recipe a name." });
   const json = JSON.stringify(rec);
   if (json.length > 300_000) return res.status(413).json({ error: "That recipe is too large to save." });
@@ -261,6 +263,38 @@ app.post("/api/extract", wrap(async (req, res) => {
   } else return res.status(400).json({ error: "Unknown import type." });
   res.json({ recipe: await extractRecipe(source) });
 }));
+
+/* ---------- recipe notes: stamped by the server with the time and the signed-in person ---------- */
+function updateRecipe(id, fn) {
+  const row = db.prepare("SELECT data FROM recipes WHERE id = ?").get(id);
+  if (!row) return null;
+  const rec = JSON.parse(row.data); fn(rec);
+  db.prepare("UPDATE recipes SET data = ?, updated_at = ? WHERE id = ?").run(JSON.stringify(rec), new Date().toISOString(), id);
+  return { ...rec, images: recipeImages(id) };
+}
+app.post("/api/recipes/:id/notes", (req, res) => {
+  const text = String(req.body?.text || "").trim().slice(0, 4000);
+  if (!text) return res.status(400).json({ error: "Write the note first." });
+  const rec = updateRecipe(req.params.id, (r) => { r.notes = [...(r.notes || []), { id: crypto.randomUUID(), text, at: new Date().toISOString(), by: req.email }]; });
+  if (!rec) return res.status(404).json({ error: "That recipe was deleted." });
+  res.json(rec);
+});
+app.patch("/api/recipes/:id/notes/:noteId", (req, res) => {
+  const text = String(req.body?.text || "").trim().slice(0, 4000);
+  if (!text) return res.status(400).json({ error: "A note can't be empty. Delete it instead." });
+  let found = false;
+  const rec = updateRecipe(req.params.id, (r) => {
+    r.notes = (r.notes || []).map((n) => (n.id === req.params.noteId ? ((found = true), { ...n, text, editedAt: new Date().toISOString(), editedBy: req.email }) : n));
+  });
+  if (!rec) return res.status(404).json({ error: "That recipe was deleted." });
+  if (!found) return res.status(404).json({ error: "That note was deleted." });
+  res.json(rec);
+});
+app.delete("/api/recipes/:id/notes/:noteId", (req, res) => {
+  const rec = updateRecipe(req.params.id, (r) => { r.notes = (r.notes || []).filter((n) => n.id !== req.params.noteId); });
+  if (!rec) return res.status(404).json({ error: "That recipe was deleted." });
+  res.json(rec);
+});
 
 /* ---------- original recipe photos ---------- */
 const MAX_IMAGE_BYTES = 25 * 1024 * 1024, MAX_IMAGES_PER_RECIPE = 12;

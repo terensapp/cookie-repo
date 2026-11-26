@@ -130,6 +130,11 @@ function savePantry() {
   pantryTimer = setTimeout(async () => { try { await api("PUT", "/api/pantry", { items: S.pantry }); } catch (e) { writeErr(e); } pantryTimer = null; }, 400);
   render();
 }
+function putRecipe(saved) {
+  const i = S.recipes.findIndex(r => r.id === saved.id);
+  if (i >= 0) S.recipes[i] = saved; else S.recipes.push(saved);
+  render();
+}
 async function saveRecipe(rec) {
   try {
     const saved = await api("PUT", `/api/recipes/${encodeURIComponent(rec.id)}`, rec);
@@ -446,7 +451,7 @@ function viewPlan() {
 
   // reminders
   const rem = sel.filter(x => (x.r.notes || []).length);
-  const reminders = rem.length ? `<section class="panel"><div class="panel-head"><h2>Notes from last time</h2></div><div class="notes">${rem.map(x => [...x.r.notes].slice(-2).reverse().map(n => `<div class="note"><span class="d">${esc(x.r.name)} · ${esc(fmtNoteDate(n.at))}</span><p>${esc(n.text)}</p></div>`).join("")).join("")}</div></section>` : "";
+  const reminders = rem.length ? `<section class="panel"><div class="panel-head"><h2>Notes from last time</h2></div><div class="notes">${rem.map(x => [...x.r.notes].slice(-2).reverse().map(n => `<div class="note"><span class="d">${esc(x.r.name)} · ${esc(fmtNoteDate(n.at))}${n.by ? ` · ${esc(personName(n.by))}` : ""}</span><p>${esc(n.text)}</p></div>`).join("")).join("")}</div></section>` : "";
 
   return head + past + settings + picked + `<div class="two">${ahead}${share}</div>` + reminders + viewTimeline(sc) + notes;
 }
@@ -541,9 +546,11 @@ function parsePantryLine(line) {
   return item ? { qty, unit, item: item.toLowerCase() } : null;
 }
 const fmtNoteDate = s => { const d = new Date(s); return isNaN(d) ? "" : d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }); };
+/* "Dec 1, 2026, 3:42 PM · Teren" — older notes saved before authors were recorded show only the date. */
+const noteStamp = n => { const d = new Date(n.at); const when = isNaN(d) ? "" : `${fmtNoteDate(n.at)}, ${d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}`; const edited = n.editedAt ? `edited${n.editedBy && n.editedBy !== n.by ? ` by ${personName(n.editedBy)}` : ""} ${fmtNoteDate(n.editedAt)}` : ""; return [when, n.by ? personName(n.by) : "", edited].filter(Boolean).join(" · "); };
 
 /* ---------- modals ---------- */
-function openModal(m) { S.modal = m; S.confirmDelete = null; renderModal(); }
+function openModal(m) { S.modal = m; S.confirmDelete = null; S.editNote = null; S.confirmNote = null; renderModal(); }
 function closeModal() { if (S.importCtl) { S.importCtl.abort(); S.importCtl = null; } S.modal = null; const el = $("#modal"); el.hidden = true; el.innerHTML = ""; document.body.style.overflow = ""; }
 function renderModal() {
   const m = S.modal, el = $("#modal"); if (!m) return;
@@ -607,7 +614,9 @@ function viewDetail(r) {
     const odd = g.unit === "each" && q != null && q % 1 > 0.01 && /egg/i.test(g.item) ? " (whisk, then measure)" : "";
     return `<li><span class="q">${esc(q == null ? "" : qtyText(q, g.unit) + " " + unitText(g.unit, q))}</span><span>${esc(g.item)}${g.prep ? `<span class="muted">, ${esc(g.prep)}</span>` : ""}${esc(odd)}</span></li>`;
   }).join("");
-  const notes = (r.notes || []).slice().reverse().map(n => `<div class="note"><span class="d">${esc(fmtNoteDate(n.at))}</span><p>${esc(n.text)}</p><button class="btn ghost sm" data-act="del-note" data-id="${esc(r.id)}" data-note="${esc(n.id)}" aria-label="Delete note">✕</button></div>`).join("");
+  const notes = (r.notes || []).slice().reverse().map(n => S.editNote === n.id
+    ? `<div class="note editing"><span class="d">${esc(noteStamp(n))}</span><textarea id="noteEdit" rows="3" aria-label="Edit note">${esc(n.text)}</textarea><div class="note-acts"><button class="btn primary sm" data-act="note-save" data-id="${esc(r.id)}" data-note="${esc(n.id)}">Save</button><button class="btn sm" data-act="note-cancel">Cancel</button></div></div>`
+    : `<div class="note"><span class="d">${esc(noteStamp(n))}</span><p>${esc(n.text)}</p><div class="note-acts"><button class="btn ghost sm" data-act="note-edit" data-note="${esc(n.id)}">Edit</button>${S.confirmNote === n.id ? `<button class="btn danger solid sm" data-act="del-note" data-id="${esc(r.id)}" data-note="${esc(n.id)}">Delete</button><button class="btn sm" data-act="note-cancel">Keep</button>` : `<button class="btn ghost sm" data-act="note-del-ask" data-note="${esc(n.id)}" aria-label="Delete note">Delete</button>`}</div></div>`).join("");
   const times = [["Prep", r.prepMinutes], ["Chill", r.chillMinutes], ["Bake", r.bakeMinutes], ["Cool", r.coolMinutes]].filter(x => num(x[1])).map(([k, v]) => `<span class="chip">${k} ${esc(fmtDur(num(v)))}</span>`).join("");
   return `<div class="sheet" role="dialog" aria-modal="true" aria-labelledby="dlg-title">
     <div class="sheet-head"><div><h2 id="dlg-title">${esc(r.name)}</h2><div class="chips" style="margin-top:8px">${r.ovenTempF ? `<span class="chip temp">${esc(r.ovenTempF)}°F</span>` : ""}${times}${r.example ? `<span class="chip ex">Example recipe</span>` : ""}${r.owner ? `<span class="chip">Owner: ${esc(personName(r.owner))}</span>` : ""}</div>${src || from ? `<p style="margin-top:8px;font-size:.85rem">${src ? `<a href="${esc(src)}" target="_blank" rel="noopener noreferrer">Original recipe on ${esc(hostOf(src))} ↗</a>` : ""}${src && from ? " · " : ""}${from ? `<span class="muted">From ${esc(from)}</span>` : ""}</p>` : ""}</div><button class="x" data-act="close" aria-label="Close">×</button></div>
@@ -821,12 +830,23 @@ document.addEventListener("click", async e => {
   else if (a === "ing-del") { S.modal.draft.ingredients.splice(Number(el.dataset.i), 1); renderModal(); }
   else if (a === "ed-save") saveDraft(el);
   else if (a === "add-note") {
-    const ta = $("#noteDraft"), text = ta.value.trim(), r = getR(id); if (!text || !r) return;
-    const rec = clone(r); rec.notes = [...(rec.notes || []), { id: uid(), text, at: new Date().toISOString() }];
-    el.disabled = true; const ok = await saveRecipe(rec); el.disabled = false;
-    if (ok) { ta.value = ""; toast("Note saved"); renderModal(); }
+    const ta = $("#noteDraft"), text = ta.value.trim(); if (!text || !getR(id)) return;
+    el.disabled = true;
+    try { putRecipe(await api("POST", `/api/recipes/${encodeURIComponent(id)}/notes`, { text })); ta.value = ""; toast("Note saved"); }
+    catch (err) { writeErr(err); }
+    el.disabled = false; renderModal();
   }
-  else if (a === "del-note") { const r = getR(id); if (!r) return; const rec = clone(r); rec.notes = (rec.notes || []).filter(n => n.id !== el.dataset.note); await saveRecipe(rec); renderModal(); }
+  else if (a === "note-edit") { S.editNote = el.dataset.note; S.confirmNote = null; renderModal(); const t = $("#noteEdit"); if (t) { t.focus(); t.setSelectionRange(t.value.length, t.value.length); } }
+  else if (a === "note-del-ask") { S.confirmNote = el.dataset.note; S.editNote = null; renderModal(); }
+  else if (a === "note-cancel") { S.editNote = null; S.confirmNote = null; renderModal(); }
+  else if (a === "note-save") {
+    const text = ($("#noteEdit")?.value || "").trim(); if (!text) { toast("A note can't be empty. Delete it instead."); return; }
+    el.disabled = true;
+    try { putRecipe(await api("PATCH", `/api/recipes/${encodeURIComponent(id)}/notes/${encodeURIComponent(el.dataset.note)}`, { text })); S.editNote = null; toast("Note updated"); }
+    catch (err) { writeErr(err); el.disabled = false; }
+    renderModal();
+  }
+  else if (a === "del-note") { S.confirmNote = null; try { putRecipe(await api("DELETE", `/api/recipes/${encodeURIComponent(id)}/notes/${encodeURIComponent(el.dataset.note)}`)); } catch (err) { writeErr(err); } renderModal(); }
   else if (a === "relink") {
     const m = S.modal, d = m.draft; m.relink = { busy: true, msg: "" }; renderModal();
     try {
