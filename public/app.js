@@ -471,7 +471,7 @@ function viewPlan() {
   const tabsRow = `<div class="bake-tabs" role="group" aria-label="Bakes in this event">${fam.length > 1 ? fam.map(b => `<button class="bake-tab" data-act="${b.id === P.id ? "noop" : "bake-open"}" data-id="${esc(b.id)}" aria-pressed="${b.id === P.id}"><b>${esc(b.name)}</b><span>${b.id === mainId ? "Main bake" : "Prebake"} · ${esc(fmtDay(parseDate(b.bakeDate)))}</span></button>`).join("") : ""}<button class="btn sm" data-act="prebake-new" data-id="${esc(mainId)}">+ Add prebake</button></div>`;
   const hasKids = S.bakes.some(b => b.partOf === P.id);
   const mains = allBakes().filter(b => b.id !== P.id && !(b.partOf && S.bakes.some(x => x.id === b.partOf))).sort(byDate).reverse();
-  const partOfField = `<label class="field"><span class="label">Part of</span><select id="p-partof" data-change="plan" data-k="partOf" ${hasKids ? "disabled title=\"This bake has prebakes, so it stays a main bake\"" : ""}><option value="">Nothing (a main bake)</option>${mains.map(b => `<option value="${esc(b.id)}" ${P.partOf === b.id ? "selected" : ""}>Prebake for ${esc(b.name)}</option>`).join("")}</select></label>`;
+  const partOfField = `<label class="field"><span class="label">Part of</span><select id="p-partof" data-change="plan" data-k="partOf" ${hasKids ? "disabled title=\"This bake has prebakes, so it stays a main bake\"" : ""}><option value="">Nothing. This is a main bake</option>${mains.map(b => `<option value="${esc(b.id)}" ${P.partOf === b.id ? "selected" : ""}>${esc(b.name)}</option>`).join("")}</select></label>`;
   const settings = `<section class="panel"><div class="settings">
     <label class="field bake-name"><span class="label">Name</span><input id="p-name" class="inp" data-change="plan" data-k="name" value="${esc(P.name)}" maxlength="80" placeholder="${esc(bakeNameFor(P.bakeDate))}"></label>
     ${partOfField}
@@ -665,7 +665,7 @@ function viewBakes() {
         <label class="field bake-name"><span class="label">Name</span><input id="nb-name" class="inp" maxlength="80" value="${esc(f.name)}" placeholder="${esc(f.partOf ? "e.g. Sapp prebake" : bakeNameFor(f.bakeDate))}"></label>
         <label class="field"><span class="label">Bake day</span><input id="nb-date" type="date" class="inp" value="${esc(f.bakeDate)}" required></label>
         <label class="field"><span class="label">Cookies</span><select id="nb-copy" class="inp">${opts}</select></label>
-        <label class="field"><span class="label">Part of</span><select id="nb-partof" class="inp"><option value="">Nothing (a main bake)</option>${allBakes().filter(b => !(b.partOf && S.bakes.some(x => x.id === b.partOf))).sort(byDate).reverse().map(b => `<option value="${esc(b.id)}" ${f.partOf === b.id ? "selected" : ""}>Prebake for ${esc(b.name)}</option>`).join("")}</select></label>
+        <label class="field"><span class="label">Part of</span><select id="nb-partof" class="inp"><option value="">Nothing. This is a main bake</option>${allBakes().filter(b => !(b.partOf && S.bakes.some(x => x.id === b.partOf))).sort(byDate).reverse().map(b => `<option value="${esc(b.id)}" ${f.partOf === b.id ? "selected" : ""}>${esc(b.name)}</option>`).join("")}</select></label>
       </div>
       <p class="muted" style="font-size:.85rem">Copying brings over the cookies, batch sizes, bakers and oven setup. The shopping list starts fresh and you can change anything.</p>
       <div style="display:flex;gap:8px"><button class="btn primary">Create bake</button><button type="button" class="btn ghost" data-act="bake-form-cancel">Cancel</button></div>
