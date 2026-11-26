@@ -5,6 +5,7 @@ A cookie recipe box, bake-day planner and shopping list for a household.
 - **Add recipes** from a link, a photo of a recipe card or cookbook page, pasted text, or by hand. Claude reads the ingredients, times, oven temperature, sheet capacity and make-ahead advice; you review before saving.
 - **Scale** any recipe from ½× to 4×.
 - **Plan a bake day**: which doughs to mix the night before, which cookies can share the oven, and a timed schedule for mixing, chilling, preheating, every sheet, cooling and decorating. Each cookie has an owner and a baker.
+- **Keep every bake**: each bake day (the December bake, a spring cookie swap) has its own cookies, schedule, shopping checks and notes. Start a new one empty or copied from an earlier one, and look back at what you made.
 - **Shop**: one combined list for everything on the plan, minus what's already in the pantry, with butter in sticks and flour and sugar in pounds.
 - **Notes** on each recipe for next time.
 - **Sign-in by emailed code**, limited to the people on the Settings list.

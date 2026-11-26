@@ -225,6 +225,17 @@ main{padding-block:24px 64px;display:flex;flex-direction:column;gap:20px}
 .login input{font-size:1.05rem;padding:10px 12px}
 .login .code{font-family:var(--f-mono);letter-spacing:.3em;font-size:1.4rem;text-align:center}
 /* people & filters */
+.bake-name{flex:1 1 220px}
+.bake-name .inp{width:100%}
+#p-notes{width:100%;resize:vertical}
+.bake-form{display:flex;flex-direction:column;gap:12px;margin:0}
+.bake-form h3{font-size:1.05rem}
+.bake-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px 12px;align-items:center;padding:12px 0;border-top:1px solid var(--line)}
+.bake-row .nm{font-weight:700}
+.bake-row .sub{font-size:.85rem;color:var(--muted);overflow-wrap:anywhere}
+.bake-row .confirm{grid-column:1/-1}
+.bake-acts{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+@media (max-width:560px){.bake-row{grid-template-columns:1fr}.bake-acts{justify-content:flex-start}}
 .person{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto;gap:10px;align-items:center;padding:10px 0;border-top:1px solid var(--line)}
 .person:first-of-type{border-top:0}
 .person .em{font-size:.85rem;color:var(--muted);overflow-wrap:anywhere}

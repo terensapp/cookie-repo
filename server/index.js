@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import express from "express";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -100,10 +101,49 @@ app.use("/api", (req, res, next) => {
 /* ---------- data ---------- */
 const people = () => auth.listAllowed().map(({ email, name }) => ({ email, name }));
 const allRecipes = () => db.prepare("SELECT data FROM recipes").all().map((r) => JSON.parse(r.data));
-const DEFAULT_PLAN = { start: "09:00", ovens: 1, sheetsPerOven: 2, aheadAll: false, selections: {}, have: {} };
+const DEFAULT_PLAN = { start: "09:00", ovens: 1, sheetsPerOven: 2, aheadAll: false, selections: {}, have: {}, notes: "" };
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+const bakeName = (date) => (DATE_RE.test(date || "") ? `${MONTHS[Number(date.slice(5, 7)) - 1]} ${date.slice(0, 4)} bake` : "Bake day");
+const nextSaturday = () => { const d = new Date(); d.setDate(d.getDate() + (((6 - d.getDay()) + 7) % 7 || 7)); return d.toISOString().slice(0, 10); };
+
+/* ---------- bakes: each bake day keeps its own plan, cookies and shopping checks ---------- */
+const getBake = (id) => { const r = db.prepare("SELECT data FROM bakes WHERE id = ?").get(id); return r ? JSON.parse(r.data) : null; };
+function putBake(bake) {
+  const now = new Date().toISOString();
+  db.prepare(`INSERT INTO bakes (id, data, created_at, updated_at) VALUES (?, ?, ?, ?)
+              ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at`).run(bake.id, JSON.stringify(bake), now, now);
+  return bake;
+}
+const recipeExists = (id) => !!db.prepare("SELECT 1 FROM recipes WHERE id = ?").get(id);
+const createBake = (fields) => putBake({ ...DEFAULT_PLAN, bakeDate: nextSaturday(), ...fields, id: crypto.randomUUID() });
+function bakeList() {
+  const names = new Map(allRecipes().map((r) => [r.id, r.name]));
+  return db.prepare("SELECT data, created_at FROM bakes").all().map((row) => {
+    const b = JSON.parse(row.data);
+    const cookies = Object.entries(b.selections || {}).map(([id, v]) => names.get(id) || v?.name || "Deleted recipe");
+    const bakers = [...new Set(Object.values(b.selections || {}).map((v) => v?.baker).filter(Boolean))];
+    return { id: b.id, name: b.name, bakeDate: b.bakeDate, cookies, bakers, createdAt: row.created_at };
+  }).sort((a, b) => String(b.bakeDate).localeCompare(String(a.bakeDate)) || String(b.createdAt).localeCompare(String(a.createdAt)));
+}
+/* The bake a person has open; new people land on the most recent one. */
+function openBake(email) {
+  const id = getKV(`open:${email}`, null);
+  const b = id && getBake(id);
+  if (b) return b;
+  const latest = bakeList()[0];
+  return latest ? getBake(latest.id) : createBake({ name: bakeName(nextSaturday()) });
+}
+const bakeState = (email) => ({ plan: openBake(email), bakes: bakeList() });
+
+/* First start after bakes were added: the existing plan becomes the first saved bake. */
+if (!db.prepare("SELECT 1 FROM bakes LIMIT 1").get()) {
+  const old = getKV("plan", null);
+  if (old) createBake({ ...old, name: old.name || bakeName(old.bakeDate) });
+}
 
 app.get("/api/state", (req, res) => {
-  res.json({ me: people().find((p) => p.email === req.email), people: people(), recipes: allRecipes(), plan: getKV("plan", DEFAULT_PLAN), pantry: getKV("pantry", []) });
+  res.json({ me: people().find((p) => p.email === req.email), people: people(), recipes: allRecipes(), ...bakeState(req.email), pantry: getKV("pantry", []) });
 });
 
 app.put("/api/pantry", (req, res) => {
@@ -130,15 +170,50 @@ app.put("/api/recipes/:id", (req, res) => {
 
 app.delete("/api/recipes/:id", (req, res) => {
   db.prepare("DELETE FROM recipes WHERE id = ?").run(req.params.id);
-  const plan = getKV("plan", DEFAULT_PLAN);
-  if (plan.selections?.[req.params.id]) { delete plan.selections[req.params.id]; setKV("plan", plan); }
+  res.json({ ok: true }); // saved bakes keep the recipe's name, so past bakes still say what was made
+});
+
+function cleanBake(body, id) {
+  if (!isPlainObject(body) || JSON.stringify(body).length > 100_000) return null;
+  const b = { ...body, id };
+  b.name = String(b.name || "").trim().slice(0, 80) || bakeName(b.bakeDate);
+  if (!DATE_RE.test(b.bakeDate || "")) b.bakeDate = nextSaturday();
+  b.notes = String(b.notes || "").slice(0, 5000);
+  if (!isPlainObject(b.selections)) b.selections = {};
+  if (!isPlainObject(b.have)) b.have = {};
+  return b;
+}
+
+app.put("/api/bakes/:id", (req, res) => {
+  const { id } = req.params;
+  if (!ID_RE.test(id) || !getBake(id)) return res.status(404).json({ error: "That bake was deleted. Pick another one from Bakes." });
+  const b = cleanBake(req.body, id);
+  if (!b) return res.status(400).json({ error: "The plan couldn't be saved." });
+  putBake(b);
   res.json({ ok: true });
 });
 
-app.put("/api/plan", (req, res) => {
-  if (!isPlainObject(req.body) || JSON.stringify(req.body).length > 100_000) return res.status(400).json({ error: "The plan couldn't be saved." });
-  setKV("plan", req.body);
-  res.json({ ok: true });
+/* New bake, empty or with the cookies, batch sizes, bakers and oven setup of an earlier one. */
+app.post("/api/bakes", (req, res) => {
+  const { name, bakeDate, copyFrom } = req.body || {};
+  if (!DATE_RE.test(bakeDate || "")) return res.status(400).json({ error: "Pick a date for the bake." });
+  const src = copyFrom ? getBake(String(copyFrom)) : null;
+  if (copyFrom && !src) return res.status(404).json({ error: "The bake to copy from was deleted." });
+  const carry = src ? { start: src.start, ovens: src.ovens, sheetsPerOven: src.sheetsPerOven, aheadAll: src.aheadAll, selections: Object.fromEntries(Object.entries(src.selections || {}).filter(([id]) => recipeExists(id)).map(([id, v]) => [id, { ...v }])) } : {};
+  const b = createBake({ ...carry, name: String(name || "").trim().slice(0, 80) || bakeName(bakeDate), bakeDate });
+  setKV(`open:${req.email}`, b.id);
+  res.json(bakeState(req.email));
+});
+
+app.post("/api/bakes/:id/open", (req, res) => {
+  if (!getBake(req.params.id)) return res.status(404).json({ error: "That bake was deleted." });
+  setKV(`open:${req.email}`, req.params.id);
+  res.json(bakeState(req.email));
+});
+
+app.delete("/api/bakes/:id", (req, res) => {
+  db.prepare("DELETE FROM bakes WHERE id = ?").run(req.params.id);
+  res.json(bakeState(req.email));
 });
 
 app.post("/api/examples", (req, res) => {
@@ -206,7 +281,7 @@ app.use((err, req, res, next) => {
 });
 
 app.get("/healthz", (req, res) => res.send("ok"));
-app.use(express.static(path.join(here, "..", "public"), { extensions: ["html"], maxAge: "5m" }));
+app.use(express.static(path.join(here, "..", "public"), { extensions: ["html"], maxAge: 0 /* revalidate by ETag, so a deploy reaches everyone at once */ }));
 app.get("/{*any}", (req, res) => res.sendFile(path.join(here, "..", "public", "index.html")));
 
 app.listen(PORT, () => console.log(`Cookie Repo listening on :${PORT}`));

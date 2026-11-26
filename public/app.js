@@ -8,7 +8,7 @@ const uid = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(3
 const clone = o => JSON.parse(JSON.stringify(o));
 const isoDate = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 const parseDate = s => { const [y, m, d] = String(s || "").split("-").map(Number); return y ? new Date(y, m - 1, d) : new Date(); };
-const fmtDay = d => d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+const fmtDay = d => d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric", ...(d.getFullYear() !== new Date().getFullYear() ? { year: "numeric" } : {}) });
 const toMin = s => { const [h, m] = String(s || "09:00").split(":").map(Number); return (h || 0) * 60 + (m || 0); };
 const fmtT = m => { m = Math.round(m); const h24 = Math.floor(m / 60) % 24, mm = String(m % 60).padStart(2, "0"); const h = h24 % 12 || 12; return `${h}:${mm} ${h24 < 12 ? "AM" : "PM"}`; };
 const fmtDur = m => { m = Math.round(m); if (m < 60) return `${m} min`; if (m >= 720) return `${Math.round(m / 60)} h`; const h = Math.floor(m / 60), r = m % 60; return r ? `${h} h ${r} min` : `${h} h`; };
@@ -52,9 +52,11 @@ function unitText(unit, q) {
 
 /* ---------- state ---------- */
 const TABS = ["recipes", "plan", "shopping", "settings"];
-function defaultPlan() { const d = new Date(); d.setDate(d.getDate() + (((6 - d.getDay()) + 7) % 7 || 7)); return { bakeDate: isoDate(d), start: "09:00", ovens: 1, sheetsPerOven: 2, aheadAll: false, selections: {}, have: {} }; }
+function defaultPlan() { const d = new Date(); d.setDate(d.getDate() + (((6 - d.getDay()) + 7) % 7 || 7)); return { id: "", name: "", bakeDate: isoDate(d), start: "09:00", ovens: 1, sheetsPerOven: 2, aheadAll: false, selections: {}, have: {}, notes: "" }; }
+const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+const bakeNameFor = date => /^\d{4}-\d{2}-\d{2}$/.test(date || "") ? `${MONTHS[Number(date.slice(5, 7)) - 1]} ${date.slice(0, 4)} bake` : "Bake day";
 const S = {
-  recipes: [], loaded: false, signedIn: null, loadError: "", plan: defaultPlan(), me: { email: "", name: "" }, people: [], pantry: [],
+  recipes: [], loaded: false, signedIn: null, loadError: "", plan: defaultPlan(), bakes: [], bakeForm: null, confirmBake: null, me: { email: "", name: "" }, people: [], pantry: [],
   tab: TABS.includes(location.hash.slice(1)) ? location.hash.slice(1) : "recipes",
   modal: null, viewScale: {}, confirmDelete: null, bakerFilter: "", shopFilter: "",
   login: { step: "email", email: "", busy: false, msg: "", err: false },
@@ -78,10 +80,14 @@ async function loadState() {
     S.signedIn = true; S.me = d.me || { email: "", name: "" }; S.people = d.people || [];
     S.recipes = (d.recipes || []).sort((a, b) => String(a.name).localeCompare(String(b.name)));
     if (!pantryTimer) S.pantry = Array.isArray(d.pantry) ? d.pantry : [];
-    if (!planTimer && !planWriting) S.plan = { ...defaultPlan(), ...d.plan, bakeDate: d.plan?.bakeDate || defaultPlan().bakeDate };
+    if (!planTimer && !planWriting) applyBakes(d);
     S.loaded = true; S.loadError = "";
   } catch (e) { if (e.status !== 401) S.loadError = e.message; S.loaded = true; }
   render();
+}
+function applyBakes(d) {
+  S.plan = { ...defaultPlan(), ...d.plan, bakeDate: d.plan?.bakeDate || defaultPlan().bakeDate };
+  S.bakes = Array.isArray(d.bakes) ? d.bakes : S.bakes;
 }
 let planTimer = null, planWriting = false, planDirty = false;
 function writeErr(e) { toast(e.message || "Couldn't save just now. Try again."); }
@@ -92,8 +98,28 @@ function savePlan() {
 }
 async function flushPlan() {
   if (planWriting) return; planWriting = true;
-  while (planDirty) { planDirty = false; try { await api("PUT", "/api/plan", S.plan); } catch (e) { writeErr(e); break; } }
+  while (planDirty) {
+    planDirty = false;
+    // Keep each cookie's name with the bake, so a past bake still reads right if the recipe is later deleted.
+    for (const [id, v] of Object.entries(S.plan.selections || {})) { const r = getR(id); if (r && v) v.name = r.name; }
+    const sum = S.bakes.find(b => b.id === S.plan.id);
+    if (sum) { sum.name = S.plan.name; sum.bakeDate = S.plan.bakeDate; sum.cookies = Object.entries(S.plan.selections || {}).map(([id, v]) => getR(id)?.name || v?.name || "Deleted recipe"); }
+    try { await api("PUT", `/api/bakes/${encodeURIComponent(S.plan.id)}`, S.plan); }
+    catch (e) { writeErr(e); if (e.status === 404) { planWriting = false; loadState(); return; } break; }
+  }
   planWriting = false;
+}
+/* Finish any pending save before switching to another bake. */
+async function settlePlan() {
+  if (planTimer) { clearTimeout(planTimer); planTimer = null; planDirty = true; }
+  while (planWriting) await new Promise(r => setTimeout(r, 60));
+  if (planDirty) await flushPlan();
+}
+async function bakeCall(method, url, body, msg) {
+  await settlePlan();
+  try { applyBakes(await api(method, url, body)); S.bakerFilter = ""; S.shopFilter = ""; if (msg) toast(msg); return true; }
+  catch (e) { writeErr(e); return false; }
+  finally { render(); if (S.modal?.type === "bakes") renderModal(); }
 }
 let pantryTimer = null;
 function savePantry() {
@@ -112,12 +138,13 @@ async function saveRecipe(rec) {
 }
 async function deleteRecipe(id) {
   try { await api("DELETE", `/api/recipes/${encodeURIComponent(id)}`); } catch (e) { writeErr(e); return; }
+  if (S.plan.selections?.[id]) { delete S.plan.selections[id]; savePlan(); }
   S.recipes = S.recipes.filter(r => r.id !== id);
-  if (S.plan.selections?.[id]) delete S.plan.selections[id];
   render();
 }
 /* Pick up changes other people made: on focus and every 30 s while the page is visible and idle. */
-function refreshIfIdle() { if (S.signedIn && document.visibilityState === "visible" && !planTimer && !planWriting && !(S.modal && S.modal.type !== "detail")) loadState(); }
+const typing = () => { const a = document.activeElement; return !!a && (a.tagName === "TEXTAREA" || (a.tagName === "INPUT" && /^(text|search|email|)$/.test(a.type || ""))); };
+function refreshIfIdle() { if (S.signedIn && document.visibilityState === "visible" && !typing() && !planTimer && !planWriting && !(S.modal && S.modal.type !== "detail")) loadState(); }
 document.addEventListener("visibilitychange", refreshIfIdle);
 setInterval(refreshIfIdle, 30000);
 const personName = email => { const p = S.people.find(x => x.email === email); return p ? (p.name || p.email.split("@")[0]) : (email ? email.split("@")[0] : "Unassigned"); };
@@ -369,21 +396,28 @@ function viewRecipes() {
 function viewPlan() {
   const P = S.plan, sel = selectedList(), sc = schedule();
   const settings = `<section class="panel"><div class="settings">
+    <label class="field bake-name"><span class="label">Name</span><input id="p-name" class="inp" data-change="plan" data-k="name" value="${esc(P.name)}" maxlength="80" placeholder="${esc(bakeNameFor(P.bakeDate))}"></label>
     <label class="field"><span class="label">Bake day</span><input type="date" id="p-date" data-change="plan" data-k="bakeDate" value="${esc(P.bakeDate)}"></label>
     <label class="field"><span class="label">Start at</span><input type="time" id="p-start" data-change="plan" data-k="start" value="${esc(P.start)}"></label>
     <label class="field"><span class="label">Ovens</span><select id="p-ovens" data-change="plan" data-k="ovens">${[1, 2, 3].map(n => `<option ${num(P.ovens) === n ? "selected" : ""}>${n}</option>`).join("")}</select></label>
     <label class="field"><span class="label">Sheets per oven</span><select id="p-sheets" data-change="plan" data-k="sheetsPerOven">${[1, 2, 3, 4].map(n => `<option ${num(P.sheetsPerOven) === n ? "selected" : ""}>${n}</option>`).join("")}</select></label>
     <label class="check"><input type="checkbox" id="p-ahead" data-change="plan" data-k="aheadAll" ${P.aheadAll ? "checked" : ""}>Mix doughs the night before when they keep</label>
   </div></section>`;
-  const head = `<div class="page-head"><div><h1>Bake plan</h1><p class="muted">${esc(fmtDay(parseDate(P.bakeDate)))}${sel.length ? ` · ${sel.length} cookie${sel.length > 1 ? "s" : ""}` : ""}</p></div></div>`;
-  if (!sel.length) return head + settings + `<div class="empty"><h2>Nothing on the baking list</h2><p class="muted">Pick recipes in the recipe box with “+ Bake”. You'll get a make-ahead list, which cookies can share the oven, and a timed bake-day schedule.</p><button class="btn primary" data-act="tab" data-tab="recipes">Choose recipes</button></div>`;
+  const others = S.bakes.length - 1;
+  const head = `<div class="page-head"><div><h1>${esc(P.name || "Bake plan")}</h1><p class="muted">${esc(fmtDay(parseDate(P.bakeDate)))}${sel.length ? ` · ${sel.length} cookie${sel.length > 1 ? "s" : ""}` : ""}</p></div>
+    <button class="btn" data-act="bakes">${others > 0 ? `All bakes (${S.bakes.length})` : "All bakes"}</button><button class="btn primary" data-act="bake-new">New bake</button></div>`;
+  const past = P.bakeDate < isoDate(new Date()) ? `<div class="banner">This bake was on ${esc(fmtDay(parseDate(P.bakeDate)))}. Changes here update that record. Planning the next one? <button class="btn sm" data-act="bake-copy" data-id="${esc(P.id)}">Start a new bake from this one</button></div>` : "";
+  const gone = Object.entries(P.selections || {}).filter(([id]) => !getR(id));
+  const goneNote = gone.length ? `<p class="muted" style="font-size:.88rem">Left off this plan: ${gone.map(([, v]) => esc(v?.name || "a recipe")).join(", ")} (no longer in the recipe box).</p>` : "";
+  const notes = `<section class="panel"><div class="panel-head"><h2>Notes on this bake</h2></div><textarea id="p-notes" class="inp" rows="3" data-change="plan" data-k="notes" maxlength="5000" placeholder="How it went, what ran out, what to change next time">${esc(P.notes || "")}</textarea></section>`;
+  if (!sel.length) return head + past + settings + goneNote + `<div class="empty"><h2>Nothing on the baking list</h2><p class="muted">Pick recipes in the recipe box with “+ Bake”. You'll get a make-ahead list, which cookies can share the oven, and a timed bake-day schedule.</p><button class="btn primary" data-act="tab" data-tab="recipes">Choose recipes</button></div>` + notes;
   const picked = `<section class="panel"><div class="panel-head"><h2>Baking</h2><span class="muted">${sc.sheets} sheet${sc.sheets > 1 ? "s" : ""} · ${sc.items.reduce((a, i) => a + i.count, 0)} cookies</span></div><div class="sel-list">${sc.items.map(it => `
     <div class="sel-row"><span class="dot" style="background:var(--c${it.color})"></span>
       <div style="min-width:0"><div class="nm"><a href="#" data-act="open" data-id="${esc(it.r.id)}" style="color:inherit">${esc(it.r.name)}</a></div><div class="sub">${it.count} cookies · ${it.sheets} sheet${it.sheets > 1 ? "s" : ""} of ${it.per} · ${it.temp}°F</div></div>
       <label class="who">Baker ${personSelect(`baker-${it.r.id}`, it.baker, `class="inp" data-change="baker" data-id="${esc(it.r.id)}"`, `Baker for ${it.r.name}`, "Unassigned")}</label>
       ${scaleControl(it.r)}
       <button class="btn ghost sm" data-act="toggle" data-id="${esc(it.r.id)}" aria-label="Remove ${esc(it.r.name)}">Remove</button></div>`).join("")}</div>
-    <div class="summary"><span>Done by <b>${fmtT(sc.end)}</b></span><span>Oven rounds <b>${sc.rounds.length}</b></span><span>Sheet pans <b>${Math.min(sc.sheets, sc.cap * sc.nOv * 2)}</b></span></div></section>`;
+    ${goneNote}<div class="summary"><span>Done by <b>${fmtT(sc.end)}</b></span><span>Oven rounds <b>${sc.rounds.length}</b></span><span>Sheet pans <b>${Math.min(sc.sheets, sc.cap * sc.nOv * 2)}</b></span></div></section>`;
 
   // make ahead
   const bd = parseDate(P.bakeDate), eve = new Date(bd); eve.setDate(bd.getDate() - 1);
@@ -411,7 +445,7 @@ function viewPlan() {
   const rem = sel.filter(x => (x.r.notes || []).length);
   const reminders = rem.length ? `<section class="panel"><div class="panel-head"><h2>Notes from last time</h2></div><div class="notes">${rem.map(x => [...x.r.notes].slice(-2).reverse().map(n => `<div class="note"><span class="d">${esc(x.r.name)} · ${esc(fmtNoteDate(n.at))}</span><p>${esc(n.text)}</p></div>`).join("")).join("")}</div></section>` : "";
 
-  return head + settings + picked + `<div class="two">${ahead}${share}</div>` + reminders + viewTimeline(sc);
+  return head + past + settings + picked + `<div class="two">${ahead}${share}</div>` + reminders + viewTimeline(sc) + notes;
 }
 function viewTimeline(sc) {
   const t0 = sc.T0, t1 = Math.max(sc.end, t0 + 60), span = t1 - t0;
@@ -463,7 +497,7 @@ function viewShopping() {
   const bakers = [...new Set(sel.map(x => x.baker).filter(Boolean))];
   const shown = f ? sel.filter(x => x.baker === f) : sel;
   const filter = bakers.length > 1 ? `<label class="who">For ${personSelect("shop-filter", f, `data-change="shop-filter"`, "Show one baker's shopping", "Everyone")}</label>` : "";
-  const head = `<div class="page-head"><div><h1>Shopping list</h1><p class="muted">${shown.length ? `For ${shown.map(x => `${esc(x.r.name)}${x.scale !== 1 ? ` (${scaleLabel(x.scale)})` : ""}`).join(", ")}` : "Built from everything on the baking list"}</p></div>${filter}${sel.length ? `<button class="btn" data-act="copy-list">Copy list</button><button class="btn ghost" data-act="clear-have">Uncheck all</button>` : ""}</div>`;
+  const head = `<div class="page-head"><div><h1>Shopping list</h1><p class="muted">${esc(S.plan.name || "This bake")} · ${shown.length ? `For ${shown.map(x => `${esc(x.r.name)}${x.scale !== 1 ? ` (${scaleLabel(x.scale)})` : ""}`).join(", ")}` : "Built from everything on the baking list"}</p></div>${filter}${sel.length ? `<button class="btn" data-act="copy-list">Copy list</button><button class="btn ghost" data-act="clear-have">Uncheck all</button>` : ""}</div>`;
   let list;
   if (!sel.length) list = `<div class="empty"><h2>No recipes picked yet</h2><p class="muted">Add cookies to the bake plan and their ingredients are combined here, scaled to your batch sizes, minus what's already in your pantry.</p><button class="btn primary" data-act="tab" data-tab="recipes">Choose recipes</button></div>`;
   else {
@@ -514,8 +548,41 @@ function renderModal() {
   if (m.type === "detail") { const r = getR(m.id); if (!r) { closeModal(); return; } el.innerHTML = viewDetail(r); }
   else if (m.type === "import") el.innerHTML = viewImport();
   else if (m.type === "edit") el.innerHTML = viewEditor(m.draft, m.isNew);
+  else if (m.type === "bakes") el.innerHTML = viewBakes();
   if (draft != null && document.getElementById("noteDraft")) document.getElementById("noteDraft").value = draft;
   el.hidden = false; document.body.style.overflow = "hidden";
+}
+function newBakeForm(copyFrom) {
+  const d = defaultPlan().bakeDate;
+  return { name: "", bakeDate: d, copyFrom: copyFrom || "" };
+}
+function viewBakes() {
+  const f = S.bakeForm, today = isoDate(new Date());
+  const opts = `<option value="">Start empty</option>` + S.bakes.map(b => `<option value="${esc(b.id)}" ${f && f.copyFrom === b.id ? "selected" : ""}>Same cookies as ${esc(b.name)}</option>`).join("");
+  const form = f ? `<form class="bake-form panel" data-form="bake">
+      <h3>New bake</h3>
+      <div class="settings">
+        <label class="field bake-name"><span class="label">Name</span><input id="nb-name" class="inp" maxlength="80" value="${esc(f.name)}" placeholder="${esc(bakeNameFor(f.bakeDate))}"></label>
+        <label class="field"><span class="label">Bake day</span><input id="nb-date" type="date" class="inp" value="${esc(f.bakeDate)}" required></label>
+        <label class="field"><span class="label">Cookies</span><select id="nb-copy" class="inp">${opts}</select></label>
+      </div>
+      <p class="muted" style="font-size:.85rem">Copying brings over the cookies, batch sizes, bakers and oven setup. The shopping list starts fresh and you can change anything.</p>
+      <div style="display:flex;gap:8px"><button class="btn primary">Create bake</button><button type="button" class="btn ghost" data-act="bake-form-cancel">Cancel</button></div>
+    </form>` : `<div><button class="btn primary" data-act="bake-new">New bake</button></div>`;
+  const rows = S.bakes.map(b => {
+    const open = b.id === S.plan.id, when = b.bakeDate < today ? "past" : "upcoming";
+    const cookies = b.cookies.length ? `${b.cookies.length} cookie${b.cookies.length > 1 ? "s" : ""}: ${b.cookies.slice(0, 4).map(esc).join(", ")}${b.cookies.length > 4 ? `, +${b.cookies.length - 4} more` : ""}` : "No cookies picked";
+    const confirm = S.confirmBake === b.id ? `<div class="confirm"><span>Delete ${esc(b.name)}, its plan and its shopping checks? Recipes aren't affected.</span><button class="btn danger solid sm" data-act="bake-del-yes" data-id="${esc(b.id)}">Delete</button><button class="btn sm" data-act="bake-del-no">Keep it</button></div>` : "";
+    return `<div class="bake-row ${open ? "open" : ""}">
+      <div style="min-width:0"><div class="nm">${esc(b.name)}${open ? ` <span class="chip">Open</span>` : ""}</div>
+        <div class="sub">${esc(fmtDay(parseDate(b.bakeDate)))} · ${when}${b.bakers.length ? ` · ${b.bakers.map(e => esc(personName(e))).join(", ")}` : ""}</div>
+        <div class="sub">${cookies}</div></div>
+      <div class="bake-acts">${open ? "" : `<button class="btn sm" data-act="bake-open" data-id="${esc(b.id)}">Open</button>`}<button class="btn sm ghost" data-act="bake-copy" data-id="${esc(b.id)}">Copy</button><button class="btn sm ghost danger" data-act="bake-del" data-id="${esc(b.id)}" style="border-color:transparent">Delete</button></div>
+      ${confirm}</div>`;
+  }).join("");
+  return `<div class="sheet" role="dialog" aria-modal="true" aria-labelledby="bk-title">
+    <div class="sheet-head"><div><h2 id="bk-title">Bakes</h2><p class="muted" style="margin-top:4px">Each bake keeps its own cookies, schedule, shopping checks and notes. The pantry and recipes are shared by all of them.</p></div><button class="x" data-act="close" aria-label="Close">×</button></div>
+    <div class="sheet-body">${form}<div>${rows}</div></div></div>`;
 }
 function viewDetail(r) {
   const s = scaleOf(r.id), on = !!S.plan.selections?.[r.id], src = safeUrl(r.source);
@@ -695,6 +762,13 @@ document.addEventListener("click", async e => {
   }
   else if (a === "clear-have") { S.plan.have = {}; savePlan(); }
   else if (a === "reload") loadState();
+  else if (a === "bakes") { S.bakeForm = null; S.confirmBake = null; openModal({ type: "bakes" }); }
+  else if (a === "bake-new" || a === "bake-copy") { S.bakeForm = newBakeForm(a === "bake-copy" ? id : ""); S.confirmBake = null; if (S.modal?.type === "bakes") renderModal(); else openModal({ type: "bakes" }); $("#nb-name")?.focus(); }
+  else if (a === "bake-form-cancel") { S.bakeForm = null; renderModal(); }
+  else if (a === "bake-open") { if (await bakeCall("POST", `/api/bakes/${encodeURIComponent(id)}/open`, null)) { closeModal(); toast(`Opened ${S.plan.name}`); if (S.tab !== "shopping") go("plan"); } }
+  else if (a === "bake-del") { S.confirmBake = id; renderModal(); }
+  else if (a === "bake-del-no") { S.confirmBake = null; renderModal(); }
+  else if (a === "bake-del-yes") { S.confirmBake = null; const b = S.bakes.find(x => x.id === id); await bakeCall("DELETE", `/api/bakes/${encodeURIComponent(id)}`, null, `Deleted ${b ? b.name : "bake"}`); }
   else if (a === "examples") { el.disabled = true; try { const d = await api("POST", "/api/examples"); S.recipes = d.recipes.sort((x, y) => String(x.name).localeCompare(String(y.name))); render(); toast("Example recipes added"); } catch (err) { toast(err.message); el.disabled = false; } }
   else if (a === "login-back") { S.login = { step: "email", email: S.login.email, busy: false, msg: "", err: false }; render(); }
   else if (a === "login-resend") requestCode(S.login.email);
@@ -725,6 +799,8 @@ document.addEventListener("change", e => {
   else if (c === "person-name") peopleCall("PATCH", `/api/people/${encodeURIComponent(el.dataset.email)}`, { name: el.value });
   else if (el.dataset.pantry != null) { const it = S.pantry[Number(el.dataset.pantry)]; if (it) { it[el.dataset.k] = el.dataset.k === "qty" ? parseQty(el.value) : el.value; savePantry(); } }
   else if (c === "scale") { setScale(el.dataset.id, el.value); if (S.modal?.type === "detail") renderModal(); }
+  else if (el.id === "nb-date" && S.bakeForm) { S.bakeForm.bakeDate = el.value; const n = $("#nb-name"); if (n) n.placeholder = bakeNameFor(el.value); }
+  else if (el.id === "nb-copy" && S.bakeForm) S.bakeForm.copyFrom = el.value;
   else if (c === "plan") { const k = el.dataset.k; S.plan[k] = el.type === "checkbox" ? el.checked : (["ovens", "sheetsPerOven"].includes(k) ? Number(el.value) : el.value); savePlan(); }
   else if (c === "have") { S.plan.have = { ...(S.plan.have || {}) }; if (el.checked) S.plan.have[el.dataset.key] = true; else delete S.plan.have[el.dataset.key]; savePlan(); }
   else if (el.id === "imp-file") addFiles(el.files);
@@ -754,6 +830,14 @@ document.addEventListener("submit", async e => {
   e.preventDefault();
   if (form === "email") requestCode(String($("#login-email").value || "").trim().toLowerCase());
   else if (form === "code") submitCode($("#login-code").value);
+  else if (form === "bake") {
+    const f = S.bakeForm; if (!f) return;
+    f.name = $("#nb-name").value.trim(); f.bakeDate = $("#nb-date").value; f.copyFrom = $("#nb-copy").value;
+    if (!f.bakeDate) { toast("Pick a date for the bake."); return; }
+    if (await bakeCall("POST", "/api/bakes", { name: f.name || bakeNameFor(f.bakeDate), bakeDate: f.bakeDate, copyFrom: f.copyFrom || undefined })) {
+      S.bakeForm = null; closeModal(); toast(`${S.plan.name} is ready`); go("plan");
+    }
+  }
   else if (form === "person") {
     const email = $("#np-email").value.trim(), name = $("#np-name").value.trim();
     if (await peopleCall("POST", "/api/people", { email, name })) toast(`${name || email} can now sign in`);
