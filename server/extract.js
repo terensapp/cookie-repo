@@ -9,6 +9,7 @@ const Recipe = z.object({
   isRecipe: z.boolean().describe("false if the source holds no cookie or baking recipe"),
   problem: z.string().describe("why no recipe could be read; empty when isRecipe is true"),
   name: z.string(),
+  link: z.string().describe("a web address for this recipe if one is printed or visible in the source, such as the URL in the footer of a printed web page; copy it exactly; empty if none"),
   yieldCount: z.number().describe("cookies the recipe makes as written"),
   ingredients: z.array(z.object({
     qty: z.number().nullable().describe("decimal amount; 2 1/4 -> 2.25; null for 'to taste'"),

@@ -2,7 +2,8 @@ import crypto from "node:crypto";
 import express from "express";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { db, getKV, setKV } from "./db.js";
+import fs from "node:fs";
+import { db, getKV, setKV, IMAGE_DIR } from "./db.js";
 import * as auth from "./auth.js";
 import { sendCode } from "./email.js";
 import { extractRecipe, ExtractError } from "./extract.js";
@@ -100,7 +101,19 @@ app.use("/api", (req, res, next) => {
 
 /* ---------- data ---------- */
 const people = () => auth.listAllowed().map(({ email, name }) => ({ email, name }));
-const allRecipes = () => db.prepare("SELECT data FROM recipes").all().map((r) => JSON.parse(r.data));
+function imagesByRecipe() {
+  const m = new Map();
+  for (const i of db.prepare("SELECT id, recipe_id, type, size, page, has_thumb FROM recipe_images ORDER BY page, created_at").all()) {
+    if (!m.has(i.recipe_id)) m.set(i.recipe_id, []);
+    m.get(i.recipe_id).push({ id: i.id, type: i.type, size: i.size, thumb: !!i.has_thumb });
+  }
+  return m;
+}
+const recipeImages = (id) => imagesByRecipe().get(id) || [];
+const allRecipes = () => {
+  const imgs = imagesByRecipe();
+  return db.prepare("SELECT data FROM recipes").all().map((r) => { const rec = JSON.parse(r.data); rec.images = imgs.get(rec.id) || []; return rec; });
+};
 const DEFAULT_PLAN = { start: "09:00", ovens: 1, sheetsPerOven: 2, aheadAll: false, selections: {}, have: {}, notes: "" };
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
@@ -159,17 +172,19 @@ const isPlainObject = (v) => v && typeof v === "object" && !Array.isArray(v);
 app.put("/api/recipes/:id", (req, res) => {
   const { id } = req.params;
   if (!ID_RE.test(id) || !isPlainObject(req.body)) return res.status(400).json({ error: "That recipe couldn't be saved." });
-  const rec = { ...req.body, id };
+  const { images: _ignored, ...body } = req.body;
+  const rec = { ...body, id };
   if (!String(rec.name || "").trim()) return res.status(400).json({ error: "Give the recipe a name." });
   const json = JSON.stringify(rec);
   if (json.length > 300_000) return res.status(413).json({ error: "That recipe is too large to save." });
   db.prepare(`INSERT INTO recipes (id, data, updated_at) VALUES (?, ?, ?)
               ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at`).run(id, json, new Date().toISOString());
-  res.json(rec);
+  res.json({ ...rec, images: recipeImages(id) });
 });
 
 app.delete("/api/recipes/:id", (req, res) => {
   db.prepare("DELETE FROM recipes WHERE id = ?").run(req.params.id);
+  for (const { id } of db.prepare("SELECT id FROM recipe_images WHERE recipe_id = ?").all(req.params.id)) removeImage(id);
   res.json({ ok: true }); // saved bakes keep the recipe's name, so past bakes still say what was made
 });
 
@@ -232,7 +247,7 @@ app.post("/api/extract", wrap(async (req, res) => {
     const page = await fetchRecipePage(url);
     source = { text: page.text };
     const recipe = await extractRecipe(source);
-    return res.json({ recipe: { ...recipe, source: page.url } });
+    return res.json({ recipe: { ...recipe, link: page.url } });
   }
   if (kind === "text") {
     if (String(text).trim().length < 40) return res.status(400).json({ error: "Paste the full recipe, including the ingredient list." });
@@ -246,6 +261,76 @@ app.post("/api/extract", wrap(async (req, res) => {
   } else return res.status(400).json({ error: "Unknown import type." });
   res.json({ recipe: await extractRecipe(source) });
 }));
+
+/* ---------- original recipe photos ---------- */
+const MAX_IMAGE_BYTES = 25 * 1024 * 1024, MAX_IMAGES_PER_RECIPE = 12;
+/* Trust the file's own bytes, not the browser's label. Only plain photo formats are kept. */
+function sniffImage(b) {
+  if (b.length < 12) return null;
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return "image/jpeg";
+  if (b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return "image/png";
+  if (b.toString("ascii", 0, 4) === "GIF8") return "image/gif";
+  if (b.toString("ascii", 0, 4) === "RIFF" && b.toString("ascii", 8, 12) === "WEBP") return "image/webp";
+  if (b.toString("ascii", 4, 8) === "ftyp") {
+    const brand = b.toString("ascii", 8, 12);
+    if (["heic", "heix", "hevc", "heim", "heis", "mif1", "msf1"].includes(brand)) return "image/heic";
+    if (brand === "avif") return "image/avif";
+  }
+  return null;
+}
+const imagePath = (id, thumb) => path.join(IMAGE_DIR, thumb ? `${id}.thumb` : id);
+function removeImage(id) {
+  db.prepare("DELETE FROM recipe_images WHERE id = ?").run(id);
+  for (const t of [false, true]) fs.rm(imagePath(id, t), { force: true }, () => {});
+}
+const rawImage = express.raw({ type: () => true, limit: MAX_IMAGE_BYTES });
+
+app.post("/api/recipes/:id/images", rawImage, (req, res) => {
+  const { id } = req.params;
+  if (!db.prepare("SELECT 1 FROM recipes WHERE id = ?").get(id)) return res.status(404).json({ error: "Save the recipe before adding photos." });
+  if (limit(`img:${req.email}`, 120, 3600_000)) return res.status(429).json({ error: "Too many photos for one hour. Try again later." });
+  const count = db.prepare("SELECT COUNT(*) AS n FROM recipe_images WHERE recipe_id = ?").get(id).n;
+  if (count >= MAX_IMAGES_PER_RECIPE) return res.status(400).json({ error: `A recipe can keep up to ${MAX_IMAGES_PER_RECIPE} photos.` });
+  const buf = Buffer.isBuffer(req.body) ? req.body : null;
+  const type = buf && sniffImage(buf);
+  if (!type) return res.status(400).json({ error: "That file isn't a photo Cookie Repo can keep (JPEG, PNG, HEIC, WebP or GIF)." });
+  const imgId = crypto.randomUUID();
+  fs.writeFileSync(imagePath(imgId), buf);
+  const page = Number.isInteger(Number(req.query.page)) ? Number(req.query.page) : count;
+  db.prepare("INSERT INTO recipe_images (id, recipe_id, type, size, page, created_at) VALUES (?, ?, ?, ?, ?, ?)").run(imgId, id, type, buf.length, page, new Date().toISOString());
+  res.json({ id: imgId, images: recipeImages(id) });
+});
+
+/* A small JPEG preview made by the browser, so lists don't load full-size photos. */
+app.put("/api/images/:imgId/thumb", express.raw({ type: () => true, limit: 2 * 1024 * 1024 }), (req, res) => {
+  const row = db.prepare("SELECT recipe_id FROM recipe_images WHERE id = ?").get(req.params.imgId);
+  if (!row) return res.status(404).json({ error: "That photo was removed." });
+  const buf = Buffer.isBuffer(req.body) ? req.body : null;
+  if (!buf || sniffImage(buf) !== "image/jpeg") return res.status(400).json({ error: "Preview must be a JPEG." });
+  fs.writeFileSync(imagePath(req.params.imgId, true), buf);
+  db.prepare("UPDATE recipe_images SET has_thumb = 1 WHERE id = ?").run(req.params.imgId);
+  res.json({ images: recipeImages(row.recipe_id) });
+});
+
+app.get("/api/images/:imgId", (req, res) => {
+  const row = db.prepare("SELECT id, type, has_thumb FROM recipe_images WHERE id = ?").get(req.params.imgId);
+  if (!row) return res.status(404).json({ error: "Photo not found." });
+  const thumb = req.query.size === "thumb" && row.has_thumb;
+  const ext = { "image/jpeg": "jpg", "image/png": "png", "image/gif": "gif", "image/webp": "webp", "image/heic": "heic", "image/avif": "avif" }[row.type] || "img";
+  res.set({
+    "Content-Type": thumb ? "image/jpeg" : row.type,
+    "Cache-Control": "private, max-age=31536000, immutable",
+    "Content-Disposition": `${req.query.download ? "attachment" : "inline"}; filename="recipe-photo.${thumb ? "jpg" : ext}"`,
+  });
+  res.sendFile(imagePath(row.id, thumb));
+});
+
+app.delete("/api/images/:imgId", (req, res) => {
+  const row = db.prepare("SELECT recipe_id FROM recipe_images WHERE id = ?").get(req.params.imgId);
+  if (!row) return res.json({ images: [] });
+  removeImage(req.params.imgId);
+  res.json({ images: recipeImages(row.recipe_id) });
+});
 
 /* ---------- settings: who can sign in ---------- */
 app.get("/api/people", (req, res) => res.json({ people: auth.listAllowed(), me: req.email }));

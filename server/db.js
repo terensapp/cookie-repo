@@ -6,6 +6,9 @@ const file = process.env.DATABASE_PATH || "./data/cookie-tin.db";
 fs.mkdirSync(path.dirname(file), { recursive: true });
 
 export const db = new DatabaseSync(file);
+/* Original recipe photos live next to the database, on the same volume. */
+export const IMAGE_DIR = path.join(path.dirname(file), "images");
+fs.mkdirSync(IMAGE_DIR, { recursive: true });
 
 db.exec(`
   PRAGMA journal_mode = WAL;
@@ -38,6 +41,16 @@ db.exec(`
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS recipe_images (
+    id TEXT PRIMARY KEY,
+    recipe_id TEXT NOT NULL,
+    type TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    page INTEGER NOT NULL DEFAULT 0,
+    has_thumb INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS recipe_images_recipe ON recipe_images (recipe_id);
   CREATE TABLE IF NOT EXISTS kv (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL

@@ -12,7 +12,9 @@ const fmtDay = d => d.toLocaleDateString(undefined, { weekday: "short", month: "
 const toMin = s => { const [h, m] = String(s || "09:00").split(":").map(Number); return (h || 0) * 60 + (m || 0); };
 const fmtT = m => { m = Math.round(m); const h24 = Math.floor(m / 60) % 24, mm = String(m % 60).padStart(2, "0"); const h = h24 % 12 || 12; return `${h}:${mm} ${h24 < 12 ? "AM" : "PM"}`; };
 const fmtDur = m => { m = Math.round(m); if (m < 60) return `${m} min`; if (m >= 720) return `${Math.round(m / 60)} h`; const h = Math.floor(m / 60), r = m % 60; return r ? `${h} h ${r} min` : `${h} h`; };
-const safeUrl = u => /^https:\/\//i.test(String(u || "")) ? String(u) : "";
+const safeUrl = u => /^https?:\/\/[^\s]+$/i.test(String(u || "").trim()) ? String(u).trim() : "";
+const fixLink = u => { u = String(u || "").trim().replace(/[).,;]+$/, ""); if (!u) return ""; if (!/^https?:\/\//i.test(u) && /^(www\.)?[a-z0-9-]+(\.[a-z0-9-]+)+(\/\S*)?$/i.test(u)) u = "https://" + u; return safeUrl(u); };
+const hostOf = u => { try { return new URL(u).hostname.replace(/^www\./, ""); } catch { return u; } };
 
 const UNITS = ["", "tsp", "tbsp", "cup", "g", "kg", "oz", "lb", "ml", "l", "stick", "each", "pinch"];
 const CATS = ["Baking staples", "Dairy & eggs", "Sugar & sweeteners", "Mix-ins", "Spices & extracts", "Produce", "Other"];
@@ -585,8 +587,21 @@ function viewBakes() {
     <div class="sheet-head"><div><h2 id="bk-title">Bakes</h2><p class="muted" style="margin-top:4px">Each bake keeps its own cookies, schedule, shopping checks and notes. The pantry and recipes are shared by all of them.</p></div><button class="x" data-act="close" aria-label="Close">×</button></div>
     <div class="sheet-body">${form}<div>${rows}</div></div></div>`;
 }
+function viewPhotos(r) {
+  const imgs = r.images || [], up = S.uploading?.id === r.id ? S.uploading : null;
+  const items = imgs.map((im, i) => `<figure class="thumb"><a href="/api/images/${esc(im.id)}" target="_blank" rel="noopener" title="Open full size"><img alt="Original photo ${i + 1}" loading="lazy" src="/api/images/${esc(im.id)}${im.thumb ? "?size=thumb" : ""}"></a>
+    <figcaption>${im.type === "image/heic" && !im.thumb ? "HEIC · " : ""}${fmtSize(im.size)}</figcaption>
+    <div class="thumb-acts"><a class="btn sm" href="/api/images/${esc(im.id)}?download=1" aria-label="Download photo ${i + 1}">↓</a><button class="btn sm" data-act="img-rm" data-id="${esc(r.id)}" data-img="${esc(im.id)}" aria-label="Remove photo ${i + 1}">✕</button></div></figure>`).join("");
+  const confirm = S.confirmImg && imgs.some(i => i.id === S.confirmImg) ? `<div class="confirm"><span>Remove this photo for good?</span><button class="btn danger solid sm" data-act="img-rm-yes" data-id="${esc(r.id)}">Remove</button><button class="btn sm" data-act="img-rm-no">Keep it</button></div>` : "";
+  return `<div><span class="label">Original photos</span>
+    ${imgs.length ? `<div class="thumbs" style="margin-top:8px">${items}</div>` : `<p class="muted" style="font-size:.9rem;margin-top:4px">No photos yet. Keep a picture of the recipe card or page here.</p>`}
+    ${confirm}
+    ${up ? `<div class="status" style="margin-top:8px"><div class="spin"></div><span>Saving photo ${Math.min(up.done + 1, up.total)} of ${up.total}…</span></div>`
+      : `<div style="margin-top:8px"><label class="btn sm" for="add-photo-${esc(r.id)}" style="cursor:pointer">+ Add photos</label><input id="add-photo-${esc(r.id)}" data-addphoto="${esc(r.id)}" type="file" accept="image/*" multiple hidden></div>`}</div>`;
+}
+const fmtSize = b => b >= 1048576 ? `${(b / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1024))} KB`;
 function viewDetail(r) {
-  const s = scaleOf(r.id), on = !!S.plan.selections?.[r.id], src = safeUrl(r.source);
+  const s = scaleOf(r.id), on = !!S.plan.selections?.[r.id], src = safeUrl(r.link) || safeUrl(r.source), from = safeUrl(r.source) ? "" : r.source;
   const ings = (r.ingredients || []).map(g => {
     const q = g.qty == null || g.qty === "" ? null : num(g.qty) * s;
     const odd = g.unit === "each" && q != null && q % 1 > 0.01 && /egg/i.test(g.item) ? " (whisk, then measure)" : "";
@@ -595,7 +610,7 @@ function viewDetail(r) {
   const notes = (r.notes || []).slice().reverse().map(n => `<div class="note"><span class="d">${esc(fmtNoteDate(n.at))}</span><p>${esc(n.text)}</p><button class="btn ghost sm" data-act="del-note" data-id="${esc(r.id)}" data-note="${esc(n.id)}" aria-label="Delete note">✕</button></div>`).join("");
   const times = [["Prep", r.prepMinutes], ["Chill", r.chillMinutes], ["Bake", r.bakeMinutes], ["Cool", r.coolMinutes]].filter(x => num(x[1])).map(([k, v]) => `<span class="chip">${k} ${esc(fmtDur(num(v)))}</span>`).join("");
   return `<div class="sheet" role="dialog" aria-modal="true" aria-labelledby="dlg-title">
-    <div class="sheet-head"><div><h2 id="dlg-title">${esc(r.name)}</h2><div class="chips" style="margin-top:8px">${r.ovenTempF ? `<span class="chip temp">${esc(r.ovenTempF)}°F</span>` : ""}${times}${r.example ? `<span class="chip ex">Example recipe</span>` : ""}${r.owner ? `<span class="chip">Owner: ${esc(personName(r.owner))}</span>` : ""}</div>${src ? `<p style="margin-top:8px;font-size:.85rem"><a href="${esc(src)}" target="_blank" rel="noopener">Original recipe ↗</a></p>` : r.source ? `<p class="muted" style="margin-top:8px;font-size:.85rem">From ${esc(r.source)}</p>` : ""}</div><button class="x" data-act="close" aria-label="Close">×</button></div>
+    <div class="sheet-head"><div><h2 id="dlg-title">${esc(r.name)}</h2><div class="chips" style="margin-top:8px">${r.ovenTempF ? `<span class="chip temp">${esc(r.ovenTempF)}°F</span>` : ""}${times}${r.example ? `<span class="chip ex">Example recipe</span>` : ""}${r.owner ? `<span class="chip">Owner: ${esc(personName(r.owner))}</span>` : ""}</div>${src || from ? `<p style="margin-top:8px;font-size:.85rem">${src ? `<a href="${esc(src)}" target="_blank" rel="noopener noreferrer">Original recipe on ${esc(hostOf(src))} ↗</a>` : ""}${src && from ? " · " : ""}${from ? `<span class="muted">From ${esc(from)}</span>` : ""}</p>` : ""}</div><button class="x" data-act="close" aria-label="Close">×</button></div>
     <div class="sheet-body">
       <div class="scale-box"><span class="label">Batch</span>${scaleControl(r)}<span class="out">${r.yieldCount ? `${Math.round(num(r.yieldCount) * s)} cookies` : ""}</span><button class="toggle" data-act="toggle" data-id="${esc(r.id)}" aria-pressed="${on}" style="margin-left:auto">${on ? "✓ On the bake plan" : "+ Add to bake plan"}</button></div>
       <div class="two"><div><span class="label">Ingredients${s !== 1 ? ` · scaled ${scaleLabel(s)}` : ""}</span><ul class="ing" style="margin-top:6px">${ings || `<li><span></span><span class="muted">No ingredients yet</span></li>`}</ul></div>
@@ -603,6 +618,7 @@ function viewDetail(r) {
         <div class="field"><label class="label" for="noteDraft">Add a note</label><textarea id="noteDraft" rows="3" placeholder="e.g. Pulled at 10 min on the dark pans and they were perfect"></textarea><button class="btn" data-act="add-note" data-id="${esc(r.id)}" style="align-self:flex-start">Save note</button></div>
         ${r.makeAheadTip || num(r.doughKeepsDays) || r.freezable ? `<div><span class="label">Make ahead</span><p style="margin-top:4px;font-size:.92rem">${num(r.doughKeepsDays) ? `Dough keeps ${esc(r.doughKeepsDays)} day${num(r.doughKeepsDays) > 1 ? "s" : ""} in the fridge. ` : ""}${r.freezable ? "Freezes well. " : ""}${esc(r.makeAheadTip || "")}</p></div>` : ""}
         ${r.decorating ? `<div><span class="label">Decorating</span><p style="margin-top:4px;font-size:.92rem">${esc(r.decorating)}</p></div>` : ""}</div></div>
+      ${viewPhotos(r)}
       ${(r.steps || []).length ? `<div><span class="label">Method</span><ol class="steps" style="margin-top:8px">${r.steps.map(x => `<li>${esc(x)}</li>`).join("")}</ol></div>` : ""}
       ${S.confirmDelete === r.id ? `<div class="confirm"><span>Delete ${esc(r.name)} and its notes for good?</span><button class="btn danger solid sm" data-act="del-yes" data-id="${esc(r.id)}">Delete</button><button class="btn sm" data-act="del-no">Keep it</button></div>` : ""}
     </div>
@@ -642,8 +658,9 @@ async function runExtract(payload, busyMsg) {
     if (res.status === 401) { S.signedIn = false; closeModal(); render(); return; }
     if (!res.ok) throw new Error(d.error || "Something went wrong reading the recipe. Try again.");
     IMP.busy = false; IMP.msg = ""; S.importCtl = null;
-    if (payload.kind === "images") { IMP.files.forEach(f => URL.revokeObjectURL(f.url)); IMP.files = []; }
-    openModal({ type: "edit", isNew: true, draft: draftFrom(d.recipe, d.recipe.source || payload.source || "") });
+    const draft = draftFrom(d.recipe, d.recipe.source || "");
+    if (payload.kind === "images") { draft.photos = IMP.files; IMP.files = []; } // the original photos are saved with the recipe
+    openModal({ type: "edit", isNew: true, draft });
   } catch (e) {
     S.importCtl = null; IMP.busy = false;
     if (e.name === "AbortError") IMP.msg = "";
@@ -672,13 +689,13 @@ function shrinkImage(file) {
   });
 }
 async function importPhotos() {
-  try { const images = await Promise.all(IMP.files.map(f => shrinkImage(f.file))); runExtract({ kind: "images", images, source: "Photo" }); }
+  try { const images = await Promise.all(IMP.files.map(f => shrinkImage(f.file))); runExtract({ kind: "images", images }); }
   catch (e) { IMP.err = true; IMP.msg = e.message; renderModal(); }
 }
 function draftFrom(j, source) {
   const n = v => (v == null || v === "" ? "" : String(Math.round(num(v) * 100) / 100));
   return {
-    id: uid(), name: String(j.name || "Untitled cookies"), source: source || "", owner: j.owner || S.me.email, yieldCount: n(j.yieldCount), prepMinutes: n(j.prepMinutes), chillMinutes: n(j.chillMinutes), bakeMinutes: n(j.bakeMinutes), ovenTempF: n(j.ovenTempF), cookiesPerSheet: n(j.cookiesPerSheet), coolMinutes: n(j.coolMinutes), doughKeepsDays: n(j.doughKeepsDays), freezable: !!j.freezable, makeAheadTip: String(j.makeAheadTip || ""), decorating: String(j.decorating || ""), decorateMinutes: n(j.decorateMinutes),
+    id: uid(), name: String(j.name || "Untitled cookies"), link: fixLink(j.link) || (safeUrl(source) ? source : "") || String(j.link || ""), source: safeUrl(source) ? "" : String(source || ""), owner: j.owner || S.me.email, yieldCount: n(j.yieldCount), prepMinutes: n(j.prepMinutes), chillMinutes: n(j.chillMinutes), bakeMinutes: n(j.bakeMinutes), ovenTempF: n(j.ovenTempF), cookiesPerSheet: n(j.cookiesPerSheet), coolMinutes: n(j.coolMinutes), doughKeepsDays: n(j.doughKeepsDays), freezable: !!j.freezable, makeAheadTip: String(j.makeAheadTip || ""), decorating: String(j.decorating || ""), decorateMinutes: n(j.decorateMinutes),
     ingredients: (j.ingredients || []).map(g => ({ qty: g.qty == null ? "" : frac(num(g.qty)).replace(/^(\d)([⅛¼⅓⅜½⅝⅔¾⅞])/, "$1 $2"), unit: UNITS.includes(String(g.unit || "").toLowerCase()) ? String(g.unit || "").toLowerCase() : "", item: String(g.item || ""), prep: String(g.prep || ""), category: CATS.includes(g.category) ? g.category : "Other" })),
     stepsText: (j.steps || []).map(String).join("\n"), notes: [],
   };
@@ -697,6 +714,8 @@ function viewEditor(d, isNew) {
   return `<div class="sheet" role="dialog" aria-modal="true" aria-labelledby="ed-title">
     <div class="sheet-head"><div><h2 id="ed-title">${isNew ? "Check the recipe" : "Edit recipe"}</h2>${isNew ? `<p class="muted" style="margin-top:4px">Claude filled this in. Fix anything it misread, then save.</p>` : ""}</div><button class="x" data-act="close" aria-label="Close">×</button></div>
     <div class="sheet-body">
+      ${isNew && d.photos?.length && safeUrl(d.link) ? `<div class="banner relink"><span>The photo shows a web address: <b>${esc(hostOf(d.link))}</b>. If the photo is hard to read, Claude can read the recipe from the website instead. Your photos stay with the recipe either way.</span>
+        ${S.modal.relink?.busy ? `<span class="status"><span class="spin"></span>Reading the website…</span>` : `<button class="btn sm" data-act="relink">Read from the website instead</button>`}${S.modal.relink?.msg ? `<span class="status err">${esc(S.modal.relink.msg)}</span>` : ""}</div>` : ""}
       <div class="form-grid">
         ${f("name", "Name", "text", "wide", 'placeholder="Brown butter chocolate chip"')}
         <label class="field wide"><span class="label">Owner</span>${personSelect("ed-owner", d.owner, `data-f="owner"`, "Recipe owner", "No owner")}</label>
@@ -706,7 +725,9 @@ function viewEditor(d, isNew) {
         ${f("decorateMinutes", "Decorating min", "number", "")}
         ${f("makeAheadTip", "Make-ahead tip", "text", "full")}
         ${f("decorating", "Decorating", "text", "full", 'placeholder="Royal icing once fully cool"')}
-        ${f("source", "Source (link or book)", "text", "full")}
+        ${f("link", "Link to the original recipe", "url", "full", 'placeholder="https://…" inputmode="url"')}
+        ${f("source", "Book or other source", "text", "full", 'placeholder="Grandma\'s recipe card, or a cookbook and page"')}
+        ${d.photos?.length ? `<div class="full"><span class="label">Original photo${d.photos.length > 1 ? "s" : ""}</span><div class="thumbs" style="margin-top:6px">${d.photos.map((f, i) => `<figure class="thumb"><img alt="Page ${i + 1}" src="${esc(f.url)}"><figcaption>Page ${i + 1}</figcaption></figure>`).join("")}</div><p class="muted" style="font-size:.85rem;margin-top:6px">Saved with the recipe at full size.</p></div>` : ""}
       </div>
       <div class="ing-edit"><span class="label">Ingredients</span>
         <div class="ing-row ing-head"><span>Qty</span><span>Unit</span><span>Ingredient</span><span class="opt">Prep</span><span class="opt">Aisle</span><span></span></div>
@@ -722,15 +743,55 @@ async function saveDraft(btn) {
   const n = v => (v === "" || v == null ? null : num(v));
   const old = getR(d.id);
   const rec = {
-    id: d.id, name: d.name.trim(), source: d.source.trim(), yieldCount: n(d.yieldCount), prepMinutes: n(d.prepMinutes), chillMinutes: n(d.chillMinutes) || 0, bakeMinutes: n(d.bakeMinutes), ovenTempF: n(d.ovenTempF), cookiesPerSheet: n(d.cookiesPerSheet), coolMinutes: n(d.coolMinutes), doughKeepsDays: n(d.doughKeepsDays) || 0, freezable: !!d.freezable, makeAheadTip: d.makeAheadTip.trim(), decorating: d.decorating.trim(), decorateMinutes: n(d.decorateMinutes) || 0,
+    id: d.id, name: d.name.trim(), link: d.link.trim(), source: d.source.trim(), yieldCount: n(d.yieldCount), prepMinutes: n(d.prepMinutes), chillMinutes: n(d.chillMinutes) || 0, bakeMinutes: n(d.bakeMinutes), ovenTempF: n(d.ovenTempF), cookiesPerSheet: n(d.cookiesPerSheet), coolMinutes: n(d.coolMinutes), doughKeepsDays: n(d.doughKeepsDays) || 0, freezable: !!d.freezable, makeAheadTip: d.makeAheadTip.trim(), decorating: d.decorating.trim(), decorateMinutes: n(d.decorateMinutes) || 0,
     ingredients: d.ingredients.filter(g => g.item.trim()).map(g => ({ qty: parseQty(g.qty), unit: g.unit, item: g.item.trim(), prep: g.prep.trim(), category: g.category })),
     steps: d.stepsText.split("\n").map(s => s.replace(/^\s*\d+[.)]\s*/, "").trim()).filter(Boolean),
     owner: d.owner || "", notes: old ? clone(old.notes || []) : d.notes || [], example: !!(old && old.example && d.example), createdAt: old?.createdAt || new Date().toISOString(),
   };
+  if (rec.link && !safeUrl(rec.link)) { err.hidden = false; err.textContent = "The link should start with https://"; $("#ed-link")?.focus(); return; }
   btn.disabled = true;
   const ok = await saveRecipe(rec);
   btn.disabled = false;
-  if (ok) { toast(old ? "Recipe saved" : `${rec.name} added`); openModal({ type: "detail", id: rec.id }); }
+  if (!ok) return;
+  toast(old ? "Recipe saved" : `${rec.name} added`);
+  const photos = d.photos || [];
+  openModal({ type: "detail", id: rec.id });
+  if (photos.length) await uploadPhotos(rec.id, photos.map(p => p.file));
+  photos.forEach(p => URL.revokeObjectURL(p.url));
+}
+
+/* ---------- original photos ---------- */
+function shrinkToBlob(file, max) {
+  return new Promise(resolve => {
+    const img = new Image(), url = URL.createObjectURL(file);
+    img.onload = () => {
+      const scale = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+      const c = document.createElement("canvas"); c.width = Math.round(img.naturalWidth * scale); c.height = Math.round(img.naturalHeight * scale);
+      c.getContext("2d").drawImage(img, 0, 0, c.width, c.height); URL.revokeObjectURL(url);
+      c.toBlob(b => resolve(b), "image/jpeg", 0.8);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); resolve(null); }; // e.g. HEIC outside Safari: keep the original, skip the preview
+    img.src = url;
+  });
+}
+async function uploadPhotos(recipeId, files) {
+  S.uploading = { id: recipeId, done: 0, total: files.length }; if (S.modal?.type === "detail") renderModal();
+  const start = (getR(recipeId)?.images || []).length;
+  let failed = 0;
+  for (const [i, file] of files.entries()) {
+    try {
+      const res = await fetch(`/api/recipes/${encodeURIComponent(recipeId)}/images?page=${start + i}`, { method: "POST", body: file, headers: { "Content-Type": "application/octet-stream" } });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(d.error || "A photo couldn't be saved.");
+      let images = d.images;
+      const thumb = await shrinkToBlob(file, 480);
+      if (thumb) { const t = await fetch(`/api/images/${d.id}/thumb`, { method: "PUT", body: thumb, headers: { "Content-Type": "image/jpeg" } }); if (t.ok) images = (await t.json()).images; }
+      const r = getR(recipeId); if (r) r.images = images;
+    } catch (e) { failed++; toast(e.message === "Failed to fetch" ? "Lost the connection while saving a photo." : e.message); }
+    S.uploading.done = i + 1; if (S.modal?.type === "detail") renderModal();
+  }
+  S.uploading = null; render();
+  if (!failed) toast(files.length > 1 ? `${files.length} photos saved` : "Photo saved");
 }
 
 /* ---------- events ---------- */
@@ -766,6 +827,22 @@ document.addEventListener("click", async e => {
     if (ok) { ta.value = ""; toast("Note saved"); renderModal(); }
   }
   else if (a === "del-note") { const r = getR(id); if (!r) return; const rec = clone(r); rec.notes = (rec.notes || []).filter(n => n.id !== el.dataset.note); await saveRecipe(rec); renderModal(); }
+  else if (a === "relink") {
+    const m = S.modal, d = m.draft; m.relink = { busy: true, msg: "" }; renderModal();
+    try {
+      const r = await api("POST", "/api/extract", { kind: "url", url: d.link });
+      if (S.modal !== m) return;
+      const nd = draftFrom(r.recipe, ""); nd.id = d.id; nd.photos = d.photos; nd.owner = d.owner;
+      m.draft = nd; m.relink = null; toast("Read from the website. Check it over, then save."); renderModal();
+    } catch (err) { if (S.modal === m) { m.relink = { busy: false, msg: `${err.message} The details from your photo are unchanged.` }; renderModal(); } }
+  }
+  else if (a === "img-rm") { S.confirmImg = el.dataset.img; renderModal(); }
+  else if (a === "img-rm-no") { S.confirmImg = null; renderModal(); }
+  else if (a === "img-rm-yes") {
+    const imgId = S.confirmImg; S.confirmImg = null;
+    try { const d = await api("DELETE", `/api/images/${encodeURIComponent(imgId)}`); const r = getR(id); if (r) r.images = d.images; toast("Photo removed"); } catch (err) { writeErr(err); }
+    renderModal();
+  }
   else if (a === "del-ask") { S.confirmDelete = id; renderModal(); }
   else if (a === "del-no") { S.confirmDelete = null; renderModal(); }
   else if (a === "del-yes") { const r = getR(id); closeModal(); await deleteRecipe(id); toast(`Deleted ${r ? r.name : "recipe"}`); }
@@ -817,6 +894,7 @@ document.addEventListener("change", e => {
   else if (c === "plan") { const k = el.dataset.k; S.plan[k] = el.type === "checkbox" ? el.checked : (["ovens", "sheetsPerOven"].includes(k) ? Number(el.value) : el.value); savePlan(); }
   else if (c === "have") { S.plan.have = { ...(S.plan.have || {}) }; if (el.checked) S.plan.have[el.dataset.key] = true; else delete S.plan.have[el.dataset.key]; savePlan(); }
   else if (el.id === "imp-file" || el.id === "imp-cam") { addFiles(el.files); el.value = ""; }
+  else if (el.dataset.addphoto) { const files = [...el.files]; el.value = ""; if (files.length) uploadPhotos(el.dataset.addphoto, files); }
   else if (el.dataset.f === "freezable" && S.modal?.draft) S.modal.draft.freezable = el.checked;
   else if (el.dataset.ing != null && el.tagName === "SELECT") S.modal.draft.ingredients[Number(el.dataset.ing)][el.dataset.k] = el.value;
 });
