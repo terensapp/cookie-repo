@@ -100,7 +100,7 @@ app.use("/api", (req, res, next) => {
 });
 
 /* ---------- data ---------- */
-const people = () => auth.listAllowed().map(({ email, name }) => ({ email, name }));
+const people = () => { const m = memberOf(); return auth.listAllowed().map(({ email, name }) => ({ email, name, pantry: m[email] || "" })); };
 function imagesByRecipe() {
   const m = new Map();
   for (const i of db.prepare("SELECT id, recipe_id, type, size, page, has_thumb FROM recipe_images ORDER BY page, created_at").all()) {
@@ -138,7 +138,7 @@ function bakeList() {
     const bakers = [...new Set(Object.values(b.selections || {}).map((v) => v?.baker).filter(Boolean))];
     // Selections ride along so a shopping list can combine several bakes.
     const selections = Object.fromEntries(Object.entries(b.selections || {}).map(([id, v]) => [id, { scale: v?.scale, baker: v?.baker || "", name: v?.name || names.get(id) || "" }]));
-    return { id: b.id, name: b.name, bakeDate: b.bakeDate, partOf: b.partOf || "", cookies, bakers, selections, createdAt: row.created_at };
+    return { id: b.id, name: b.name, bakeDate: b.bakeDate, partOf: b.partOf || "", pantryId: b.pantryId, usePantry: b.usePantry, cookies, bakers, selections, createdAt: row.created_at };
   }).sort((a, b) => String(b.bakeDate).localeCompare(String(a.bakeDate)) || String(b.createdAt).localeCompare(String(a.createdAt)));
 }
 /* The bake a person has open; new people land on the most recent one. */
@@ -158,13 +158,44 @@ if (!db.prepare("SELECT 1 FROM bakes LIMIT 1").get()) {
 }
 
 app.get("/api/state", (req, res) => {
-  res.json({ me: people().find((p) => p.email === req.email), people: people(), recipes: allRecipes(), ...bakeState(req.email), pantry: getKV("pantry", []) });
+  res.json({ me: people().find((p) => p.email === req.email), people: people(), recipes: allRecipes(), ...bakeState(req.email), pantries: getPantries() });
 });
 
-app.put("/api/pantry", (req, res) => {
-  const items = req.body?.items;
-  if (!Array.isArray(items) || items.length > 500 || JSON.stringify(items).length > 100_000) return res.status(400).json({ error: "The pantry couldn't be saved." });
-  setKV("pantry", items.filter(isPlainObject).map((i) => ({ id: String(i.id || "").slice(0, 40), item: String(i.item || "").slice(0, 120), qty: i.qty == null || i.qty === "" ? null : Number(i.qty), unit: String(i.unit || "").slice(0, 10) })));
+/* ---------- pantries: one per kitchen; people and bakes each point at one ---------- */
+function getPantries() {
+  let list = getKV("pantries", null);
+  if (!list) { list = [{ id: "main", name: "Our pantry", items: getKV("pantry", []) }]; setKV("pantries", list); } // the single pantry from before
+  return list;
+}
+const memberOf = () => getKV("memberOf", {});
+/* New bakes start with their creator's pantry. */
+const personPantry = (email) => { const list = getPantries(), id = memberOf()[email]; return list.find((p) => p.id === id)?.id || list[0]?.id || ""; };
+const cleanItems = (items) => items.filter(isPlainObject).map((i) => ({ id: String(i.id || "").slice(0, 40), item: String(i.item || "").slice(0, 120), qty: i.qty == null || i.qty === "" || !Number.isFinite(Number(i.qty)) ? null : Number(i.qty), unit: String(i.unit || "").slice(0, 10) }));
+
+app.post("/api/pantries", (req, res) => {
+  const list = getPantries();
+  if (list.length >= 20) return res.status(400).json({ error: "That's a lot of pantries. Remove one first." });
+  const p = { id: crypto.randomUUID(), name: String(req.body?.name || "").trim().slice(0, 60) || "New pantry", items: [] };
+  setKV("pantries", [...list, p]);
+  res.json({ pantry: p, pantries: getPantries() });
+});
+app.put("/api/pantries/:id", (req, res) => {
+  const list = getPantries(), p = list.find((x) => x.id === req.params.id);
+  if (!p) return res.status(404).json({ error: "That pantry was removed." });
+  const { name, items } = req.body || {};
+  if (items !== undefined) {
+    if (!Array.isArray(items) || items.length > 500 || JSON.stringify(items).length > 100_000) return res.status(400).json({ error: "The pantry couldn't be saved." });
+    p.items = cleanItems(items);
+  }
+  if (name !== undefined) p.name = String(name).trim().slice(0, 60) || p.name;
+  setKV("pantries", list);
+  res.json({ ok: true });
+});
+app.delete("/api/pantries/:id", (req, res) => {
+  const id = req.params.id;
+  setKV("pantries", getPantries().filter((p) => p.id !== id));
+  const m = memberOf(); for (const k of Object.keys(m)) if (m[k] === id) delete m[k]; setKV("memberOf", m);
+  for (const s of bakeList()) { const b = getBake(s.id); if (b.pantryId === id) { b.pantryId = ""; putBake(b); } }
   res.json({ ok: true });
 });
 
@@ -201,9 +232,11 @@ function cleanBake(body, id) {
   if (!isPlainObject(b.selections)) b.selections = {};
   if (!isPlainObject(b.have)) b.have = {};
   b.partOf = mainBakeId(b.partOf, id);
-  b.shopScope = ["this", "event", "custom"].includes(b.shopScope) ? b.shopScope : "this";
+  b.shopScope = ["this", "pantry", "event", "custom"].includes(b.shopScope) ? b.shopScope : "this";
   b.shopBakes = Array.isArray(b.shopBakes) ? b.shopBakes.filter((x) => typeof x === "string" && ID_RE.test(x)).slice(0, 50) : [];
   b.usePantry = b.usePantry !== false;
+  // Which pantry this bake's shopping list subtracts. "" = none; missing = the first pantry (bakes from before).
+  if (b.pantryId !== undefined) b.pantryId = typeof b.pantryId === "string" && getPantries().some((p) => p.id === b.pantryId) ? b.pantryId : "";
   return b;
 }
 /* Prebakes hang off one main bake, one level deep: pointing at a prebake means its main bake. */
@@ -234,7 +267,7 @@ app.post("/api/bakes", (req, res) => {
   const src = copyFrom ? getBake(String(copyFrom)) : null;
   if (copyFrom && !src) return res.status(404).json({ error: "The bake to copy from was deleted." });
   const carry = src ? { start: src.start, ovens: src.ovens, sheetsPerOven: src.sheetsPerOven, aheadAll: src.aheadAll, selections: Object.fromEntries(Object.entries(src.selections || {}).filter(([id]) => recipeExists(id)).map(([id, v]) => [id, { ...v }])) } : {};
-  const b = createBake({ ...carry, name: String(name || "").trim().slice(0, 80) || bakeName(bakeDate), bakeDate });
+  const b = createBake({ ...carry, name: String(name || "").trim().slice(0, 80) || bakeName(bakeDate), bakeDate, pantryId: personPantry(req.email) });
   if (partOf) { b.partOf = mainBakeId(String(partOf), b.id); putBake(b); }
   setKV(`open:${req.email}`, b.id);
   res.json(bakeState(req.email));
@@ -394,20 +427,25 @@ app.post("/api/people", (req, res) => {
   const name = String(req.body?.name || "").trim().slice(0, 60);
   if (!auth.validEmail(email)) return res.status(400).json({ error: "Enter a valid email address." });
   auth.addAllowed(email, name, req.email);
-  res.json({ people: auth.listAllowed() });
+  res.json({ people: people() });
 });
 
 app.patch("/api/people/:email", (req, res) => {
   const email = auth.normEmail(req.params.email);
-  auth.renameAllowed(email, String(req.body?.name || "").trim().slice(0, 60));
-  res.json({ people: auth.listAllowed() });
+  if (req.body?.name !== undefined) auth.renameAllowed(email, String(req.body.name || "").trim().slice(0, 60));
+  if (req.body?.pantry !== undefined) {
+    const m = memberOf(), fam = String(req.body.pantry || "");
+    if (fam && getPantries().some((p) => p.id === fam)) m[email] = fam; else delete m[email];
+    setKV("memberOf", m);
+  }
+  res.json({ people: people() });
 });
 
 app.delete("/api/people/:email", (req, res) => {
   const email = auth.normEmail(req.params.email);
   if (email === req.email) return res.status(400).json({ error: "You can't remove yourself. Ask someone else on the list to do it." });
   auth.removeAllowed(email);
-  res.json({ people: auth.listAllowed() });
+  res.json({ people: people() });
 });
 
 /* ---------- errors, static files ---------- */

@@ -58,7 +58,7 @@ function defaultPlan() { const d = new Date(); d.setDate(d.getDate() + (((6 - d.
 const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 const bakeNameFor = date => /^\d{4}-\d{2}-\d{2}$/.test(date || "") ? `${MONTHS[Number(date.slice(5, 7)) - 1]} ${date.slice(0, 4)} bake` : "Bake day";
 const S = {
-  recipes: [], loaded: false, signedIn: null, loadError: "", plan: defaultPlan(), bakes: [], bakeForm: null, confirmBake: null, me: { email: "", name: "" }, people: [], pantry: [],
+  recipes: [], loaded: false, signedIn: null, loadError: "", plan: defaultPlan(), bakes: [], pantries: [], bakeForm: null, confirmBake: null, me: { email: "", name: "" }, people: [], pantry: [],
   tab: TABS.includes(location.hash.slice(1)) ? location.hash.slice(1) : "recipes",
   modal: null, viewScale: {}, confirmDelete: null, bakerFilter: "", shopFilter: "",
   login: { step: "email", email: "", busy: false, msg: "", err: false },
@@ -82,7 +82,7 @@ async function loadState() {
     const d = await api("GET", "/api/state");
     S.signedIn = true; S.me = d.me || { email: "", name: "" }; S.people = d.people || [];
     S.recipes = (d.recipes || []).sort((a, b) => String(a.name).localeCompare(String(b.name)));
-    if (!pantryTimer) S.pantry = Array.isArray(d.pantry) ? d.pantry : [];
+    if (!Object.keys(pantryTimers).length) S.pantries = Array.isArray(d.pantries) ? d.pantries : [];
     if (!planTimer && !planWriting) applyBakes(d);
     S.loaded = true; S.loadError = "";
   } catch (e) { if (e.status !== 401) S.loadError = e.message; S.loaded = true; }
@@ -90,7 +90,7 @@ async function loadState() {
 }
 const byDate = (a, b) => String(a.bakeDate).localeCompare(String(b.bakeDate)) || String(a.name).localeCompare(String(b.name));
 /* The open bake's summary, kept in step with unsaved edits. */
-const liveBake = b => b.id === S.plan.id ? { ...b, name: S.plan.name, bakeDate: S.plan.bakeDate, partOf: S.plan.partOf || "", selections: S.plan.selections || {} } : b;
+const liveBake = b => b.id === S.plan.id ? { ...b, name: S.plan.name, bakeDate: S.plan.bakeDate, partOf: S.plan.partOf || "", pantryId: S.plan.pantryId, usePantry: S.plan.usePantry, selections: S.plan.selections || {} } : b;
 const allBakes = () => S.bakes.map(liveBake);
 const mainOf = b => (b.partOf && S.bakes.some(x => x.id === b.partOf)) ? b.partOf : b.id;
 /* A main bake followed by its prebakes, in date order. */
@@ -102,6 +102,7 @@ function family(id = S.plan.id) {
 function shopBakeIds() {
   const P = S.plan, all = allBakes();
   if (P.shopScope === "event") return family().map(b => b.id);
+  if (P.shopScope === "pantry") { const pid = pantryIdOf(P); return family().filter(b => pantryIdOf(b) === pid).map(b => b.id); }
   if (P.shopScope === "custom") { const ids = (P.shopBakes || []).filter(id => all.some(b => b.id === id)); return ids.length ? ids : [P.id]; }
   return [P.id];
 }
@@ -146,12 +147,18 @@ async function bakeCall(method, url, body, msg) {
   catch (e) { writeErr(e); return false; }
   finally { render(); if (S.modal?.type === "bakes") renderModal(); }
 }
-let pantryTimer = null;
-function savePantry() {
-  clearTimeout(pantryTimer);
-  pantryTimer = setTimeout(async () => { try { await api("PUT", "/api/pantry", { items: S.pantry }); } catch (e) { writeErr(e); } pantryTimer = null; }, 400);
+/* Pantries: one per kitchen. A bake uses one (or none); a combined shopping list subtracts every pantry its bakes use. */
+const pantryTimers = {};
+function savePantry(p = curPantry()) {
+  if (!p) return;
+  clearTimeout(pantryTimers[p.id]);
+  pantryTimers[p.id] = setTimeout(async () => { try { await api("PUT", `/api/pantries/${encodeURIComponent(p.id)}`, { items: p.items, name: p.name }); } catch (e) { writeErr(e); } delete pantryTimers[p.id]; }, 400);
   render();
 }
+const pantryIdOf = b => b.pantryId !== undefined ? b.pantryId : (b.usePantry === false ? "" : (S.pantries[0]?.id || ""));
+const pantryById = id => S.pantries.find(p => p.id === id) || null;
+const curPantry = () => pantryById(pantryIdOf(S.plan));
+function shopPantries() { const all = allBakes(); return [...new Set(shopBakeIds().map(id => all.find(b => b.id === id)).filter(Boolean).map(pantryIdOf))].map(pantryById).filter(Boolean); }
 function putRecipe(saved) {
   const i = S.recipes.findIndex(r => r.id === saved.id);
   if (i >= 0) S.recipes[i] = saved; else S.recipes.push(saved);
@@ -280,9 +287,9 @@ function buyHint(key, a) {
 }
 /* Pantry entries match a shopping item by name; "flour" in the pantry also matches "all-purpose flour" on the list. */
 function pantryFor(key) {
-  if (S.plan.usePantry === false) return null;
-  const exact = S.pantry.filter(p => keyOf(p.item) === key && p.qty != null && p.qty !== "");
-  const rows = exact.length ? exact : S.pantry.filter(p => { const k = keyOf(p.item); return k && p.qty != null && p.qty !== "" && (key.endsWith(" " + k) || k.endsWith(" " + key)); });
+  const items = shopPantries().flatMap(p => p.items || []);
+  const exact = items.filter(p => keyOf(p.item) === key && p.qty != null && p.qty !== "");
+  const rows = exact.length ? exact : items.filter(p => { const k = keyOf(p.item); return k && p.qty != null && p.qty !== "" && (key.endsWith(" " + k) || k.endsWith(" " + key)); });
   if (!rows.length) return null;
   const acc = { vol: 0, wt: 0, each: 0, pinch: 0 };
   rows.forEach(p => addAmount(acc, num(p.qty), p.unit));
@@ -388,17 +395,18 @@ async function submitCode(code) {
 function viewSettings() {
   const rows = S.people.map(p => `<div class="person"><label class="field"><span class="label">Name</span><input id="pn-${esc(p.email)}" data-change="person-name" data-email="${esc(p.email)}" value="${esc(p.name)}" placeholder="Name"></label>
     <span class="em">${esc(p.email)}${p.email === S.me.email ? " · you" : ""}</span>
+    <label class="field"><span class="label">Pantry</span><select id="pf-${esc(p.email)}" data-change="person-pantry" data-email="${esc(p.email)}">${S.pantries.map(x => `<option value="${esc(x.id)}" ${x.id === (p.pantry || S.pantries[0]?.id) ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select></label>
     ${p.email === S.me.email ? "<span></span>" : `<button class="btn ghost sm danger" data-act="person-del" data-email="${esc(p.email)}" style="border-color:transparent">Remove</button>`}</div>`).join("");
   const confirm = S.confirmPerson ? `<div class="confirm"><span>Remove ${esc(personName(S.confirmPerson))}? They'll be signed out and can't sign in again unless re-added.</span><button class="btn danger solid sm" data-act="person-del-yes">Remove</button><button class="btn sm" data-act="person-del-no">Keep</button></div>` : "";
   return `<div class="page-head"><div><h1>Settings</h1><p class="muted">Signed in as ${esc(S.me.name || S.me.email)}</p></div><button class="btn" data-act="logout">Sign out</button></div>
     <section class="panel"><div class="panel-head"><h2>Who can sign in</h2><span class="muted">${S.people.length} ${S.people.length === 1 ? "person" : "people"}</span></div>
-      <p class="muted" style="font-size:.9rem">Anyone on this list can sign in with an emailed code. Names show up as recipe owners and bakers.</p>
+      <p class="muted" style="font-size:.9rem">Anyone on this list can sign in with an emailed code. Names show up as recipe owners and bakers. Each person is linked to a pantry, and new bakes they start use it. People who share a kitchen can share a pantry. Add and rename pantries on the Shopping tab.</p>
       <div>${rows}</div>${confirm}
       <form class="add-person" data-form="person"><input id="np-name" class="inp" placeholder="Name" aria-label="Name" maxlength="60"><input id="np-email" class="inp" type="email" placeholder="email@example.com" aria-label="Email" required><button class="btn primary">Add person</button></form>
     </section>`;
 }
 async function peopleCall(method, url, body) {
-  try { const d = await api(method, url, body); S.people = d.people.map(({ email, name }) => ({ email, name })); S.me = S.people.find(p => p.email === S.me.email) || S.me; render(); return true; }
+  try { const d = await api(method, url, body); S.people = d.people.map(({ email, name, pantry }) => ({ email, name, pantry: pantry || "" })); S.me = S.people.find(p => p.email === S.me.email) || S.me; render(); return true; }
   catch (e) { toast(e.message); return false; }
 }
 
@@ -568,6 +576,7 @@ function viewShopping() {
   const names = ids.map(id => all.find(b => b.id === id)?.name).filter(Boolean);
   const scopeBar = `<div class="seg shop-scope" role="group" aria-label="Shopping list for">
       <button data-act="shop-scope" data-scope="this" aria-pressed="${scope === "this"}">This bake</button>
+      ${fam.length > 1 && curPantry() && fam.filter(b => pantryIdOf(b) === pantryIdOf(P)).length > 1 && fam.some(b => pantryIdOf(b) !== pantryIdOf(P)) ? `<button data-act="shop-scope" data-scope="pantry" aria-pressed="${scope === "pantry"}">Everything using ${esc(curPantry().name)}</button>` : ""}
       ${fam.length > 1 ? `<button data-act="shop-scope" data-scope="event" aria-pressed="${scope === "event"}">${esc(fam[0].name)} + ${fam.length - 1} prebake${fam.length > 2 ? "s" : ""}</button>` : ""}
       <button data-act="shop-scope" data-scope="custom" aria-pressed="${scope === "custom"}">Choose bakes</button></div>
     ${scope === "custom" ? `<div class="panel shop-pick">${all.slice().sort(byDate).reverse().map(b => `<label class="check"><input type="checkbox" data-change="shop-bake" data-id="${esc(b.id)}" ${ids.includes(b.id) ? "checked" : ""}>${esc(b.name)} <span class="muted">· ${esc(fmtDay(parseDate(b.bakeDate)))}</span></label>`).join("")}</div>` : ""}`;
@@ -591,19 +600,27 @@ function viewShopping() {
   return head + scopeBar + `<div class="two" style="align-items:start">${list}${viewPantry()}</div>`;
 }
 function viewPantry() {
-  const rows = S.pantry.map((p, i) => `<div class="ing-row" style="grid-template-columns:64px 76px minmax(0,1fr) 30px">
+  const pan = curPantry(), pid = pantryIdOf(S.plan), used = shopPantries();
+  const picker = `<label class="field"><span class="label">Pantry for ${esc(S.plan.name || "this bake")}</span><select id="pantry-pick" data-change="plan" data-k="pantryId">${S.pantries.map(p => `<option value="${esc(p.id)}" ${p.id === pid ? "selected" : ""}>${esc(p.name)}</option>`).join("")}<option value="" ${pid ? "" : "selected"}>None: don't subtract anything</option></select></label>`;
+  const manage = `<div style="display:flex;gap:6px;flex-wrap:wrap"><button class="btn sm ghost" data-act="pantry-new">+ New pantry</button>${pan ? `<button class="btn sm ghost danger" data-act="pantry-remove" style="border-color:transparent">Delete this pantry</button>` : ""}</div>`;
+  const combined = used.length > 1 ? `<p class="banner" style="font-size:.85rem">This list subtracts ${used.map(p => `<b>${esc(p.name)}</b>`).join(" and ")}, since its bakes use different pantries.</p>` : "";
+  const confirmRemove = S.confirmPantryRemove && pan ? `<div class="confirm"><span>Delete ${esc(pan.name)} and its ${pan.items.length} item${pan.items.length === 1 ? "" : "s"}? Bakes using it will have no pantry.</span><button class="btn danger solid sm" data-act="pantry-remove-yes">Delete</button><button class="btn sm" data-act="pantry-remove-no">Keep</button></div>` : "";
+  if (!pan) return `<section class="panel"><div class="panel-head"><h2>Pantry</h2></div>${picker}${combined}<p class="muted" style="font-size:.88rem">${S.pantries.length ? "This bake doesn't use a pantry, so nothing is subtracted for it." : "No pantries yet. Make one for each kitchen."}</p>${manage}</section>`;
+  const rows = pan.items.map((p, i) => `<div class="ing-row" style="grid-template-columns:64px 76px minmax(0,1fr) 30px">
       <input id="pt-${i}-qty" data-pantry="${i}" data-k="qty" value="${esc(p.qty == null ? "" : String(p.qty))}" placeholder="5" aria-label="Amount">
       <select id="pt-${i}-unit" data-pantry="${i}" data-k="unit" aria-label="Unit">${UNITS.map(u => `<option value="${u}" ${u === p.unit ? "selected" : ""}>${u || "—"}</option>`).join("")}</select>
       <input id="pt-${i}-item" data-pantry="${i}" data-k="item" value="${esc(p.item)}" placeholder="all-purpose flour" aria-label="Item">
       <button class="x" data-act="pantry-del" data-i="${i}" aria-label="Remove ${esc(p.item || "item")}" style="font-size:1.1rem">×</button></div>`).join("");
-  return `<section class="panel"><div class="panel-head"><h2>Pantry</h2><span class="muted">${S.pantry.length} item${S.pantry.length === 1 ? "" : "s"}</span></div>
-    <p class="muted" style="font-size:.88rem">What you already have. It's subtracted from the shopping list, converting cups and pounds for flour, sugar and butter.</p>
-    <label class="check"><input type="checkbox" data-change="plan" data-k="usePantry" ${S.plan.usePantry === false ? "" : "checked"}>Subtract the pantry from this list</label>
-    ${S.plan.usePantry === false ? `<p class="muted" style="font-size:.85rem">Off for ${esc(S.plan.name || "this bake")}, e.g. when someone shops from their own kitchen.</p>` : ""}
-    <div class="ing-edit">${rows || `<p class="muted" style="font-size:.9rem">Nothing in the pantry yet.</p>`}<div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn sm" data-act="pantry-add">+ Add item</button>${S.pantry.length ? `<button class="btn ghost sm" data-act="pantry-clear">Clear pantry</button>` : ""}</div></div>
-    ${S.confirmPantryClear ? `<div class="confirm"><span>Remove all ${S.pantry.length} pantry items?</span><button class="btn danger solid sm" data-act="pantry-clear-yes">Clear</button><button class="btn sm" data-act="pantry-clear-no">Keep</button></div>` : ""}
+  return `<section class="panel"><div class="panel-head"><h2>${esc(pan.name)}</h2><span class="muted">${pan.items.length} item${pan.items.length === 1 ? "" : "s"}</span></div>
+    ${picker}
+    <label class="field"><span class="label">Pantry name</span><input id="pantry-name" class="inp" data-change="pantry-name" value="${esc(pan.name)}" maxlength="60" placeholder="e.g. Sapp's pantry"></label>
+    ${combined}
+    <p class="muted" style="font-size:.88rem">What this kitchen already has. It's subtracted from the shopping list, converting cups and pounds for flour, sugar and butter.</p>
+    <div class="ing-edit">${rows || `<p class="muted" style="font-size:.9rem">Nothing in this pantry yet.</p>`}<div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn sm" data-act="pantry-add">+ Add item</button>${pan.items.length ? `<button class="btn sm ghost" data-act="pantry-clear">Clear pantry</button>` : ""}</div></div>
+    ${S.confirmPantryClear ? `<div class="confirm"><span>Remove all ${pan.items.length} items from ${esc(pan.name)}?</span><button class="btn danger solid sm" data-act="pantry-clear-yes">Clear</button><button class="btn sm" data-act="pantry-clear-no">Keep</button></div>` : ""}
     <label class="field"><span class="label">Paste a list, one item per line</span><textarea id="pantry-paste" rows="4" class="inp" placeholder="5 lb all-purpose flour&#10;2 sticks unsalted butter&#10;12 large eggs&#10;1 cup chocolate chips"></textarea></label>
-    <div><button class="btn sm" data-act="pantry-paste">Add to pantry</button></div></section>`;
+    <div><button class="btn sm" data-act="pantry-paste">Add to pantry</button></div>
+    ${manage}${confirmRemove}</section>`;
 }
 /* "2 1/2 cups light brown sugar" -> {qty: 2.5, unit: "cup", item: "light brown sugar"} */
 const UNIT_WORDS = { tsp: "tsp", teaspoon: "tsp", teaspoons: "tsp", tbsp: "tbsp", tablespoon: "tbsp", tablespoons: "tbsp", cup: "cup", cups: "cup", c: "cup", g: "g", gram: "g", grams: "g", kg: "kg", oz: "oz", ounce: "oz", ounces: "oz", lb: "lb", lbs: "lb", pound: "lb", pounds: "lb", ml: "ml", l: "l", liter: "l", stick: "stick", sticks: "stick", pinch: "pinch", bag: "each", bags: "each", dozen: "each" };
@@ -966,15 +983,24 @@ document.addEventListener("click", async e => {
   else if (a === "person-del") { S.confirmPerson = el.dataset.email; render(); }
   else if (a === "person-del-no") { S.confirmPerson = null; render(); }
   else if (a === "person-del-yes") { const em = S.confirmPerson; S.confirmPerson = null; if (await peopleCall("DELETE", `/api/people/${encodeURIComponent(em)}`)) toast("Removed"); }
-  else if (a === "pantry-add") { S.pantry.push({ id: uid(), item: "", qty: null, unit: "" }); savePantry(); $(`#pt-${S.pantry.length - 1}-qty`)?.focus(); }
-  else if (a === "pantry-del") { S.pantry.splice(Number(el.dataset.i), 1); savePantry(); }
+  else if (a === "pantry-add") { const p = curPantry(); if (!p) return; p.items.push({ id: uid(), item: "", qty: null, unit: "" }); savePantry(p); $(`#pt-${p.items.length - 1}-qty`)?.focus(); }
+  else if (a === "pantry-del") { const p = curPantry(); if (!p) return; p.items.splice(Number(el.dataset.i), 1); savePantry(p); }
+  else if (a === "pantry-new") {
+    try { const d = await api("POST", "/api/pantries", { name: "New pantry" }); S.pantries = d.pantries; S.plan.pantryId = d.pantry.id; savePlan(); toast("Pantry added. Give it a name."); $("#pantry-name")?.select(); } catch (err) { writeErr(err); }
+  }
+  else if (a === "pantry-remove") { S.confirmPantryRemove = true; render(); }
+  else if (a === "pantry-remove-no") { S.confirmPantryRemove = false; render(); }
+  else if (a === "pantry-remove-yes") {
+    const p = curPantry(); S.confirmPantryRemove = false; if (!p) return;
+    try { await api("DELETE", `/api/pantries/${encodeURIComponent(p.id)}`); await settlePlan(); toast(`Deleted ${p.name}`); loadState(); } catch (err) { writeErr(err); }
+  }
   else if (a === "pantry-clear") { S.confirmPantryClear = true; render(); }
   else if (a === "pantry-clear-no") { S.confirmPantryClear = false; render(); }
-  else if (a === "pantry-clear-yes") { S.confirmPantryClear = false; S.pantry = []; savePantry(); }
+  else if (a === "pantry-clear-yes") { S.confirmPantryClear = false; const p = curPantry(); if (p) { p.items = []; savePantry(p); } }
   else if (a === "pantry-paste") {
     const lines = ($("#pantry-paste")?.value || "").split(/\n+/).map(parsePantryLine).filter(Boolean);
     if (!lines.length) { toast("Type or paste at least one item."); return; }
-    S.pantry.push(...lines.map(l => ({ id: uid(), ...l }))); savePantry(); toast(`Added ${lines.length} item${lines.length > 1 ? "s" : ""} to the pantry`);
+    const p = curPantry(); if (!p) return; p.items.push(...lines.map(l => ({ id: uid(), ...l }))); savePantry(p); toast(`Added ${lines.length} item${lines.length > 1 ? "s" : ""} to the pantry`);
   }
 });
 document.addEventListener("keydown", e => {
@@ -988,7 +1014,9 @@ document.addEventListener("change", e => {
   else if (c === "baker-filter") { S.bakerFilter = el.value; render(); }
   else if (c === "shop-filter") { S.shopFilter = el.value; render(); }
   else if (c === "person-name") peopleCall("PATCH", `/api/people/${encodeURIComponent(el.dataset.email)}`, { name: el.value });
-  else if (el.dataset.pantry != null) { const it = S.pantry[Number(el.dataset.pantry)]; if (it) { it[el.dataset.k] = el.dataset.k === "qty" ? parseQty(el.value) : el.value; savePantry(); } }
+  else if (el.dataset.pantry != null) { const p = curPantry(), it = p?.items[Number(el.dataset.pantry)]; if (it) { it[el.dataset.k] = el.dataset.k === "qty" ? parseQty(el.value) : el.value; savePantry(p); } }
+  else if (c === "pantry-name") { const p = curPantry(); if (p && el.value.trim()) { p.name = el.value.trim(); savePantry(p); } }
+  else if (c === "person-pantry") peopleCall("PATCH", `/api/people/${encodeURIComponent(el.dataset.email)}`, { pantry: el.value });
   else if (c === "scale") { setScale(el.dataset.id, el.value); if (S.modal?.type === "detail") renderModal(); }
   else if (el.id === "nb-date" && S.bakeForm) { S.bakeForm.bakeDate = el.value; const n = $("#nb-name"); if (n) n.placeholder = bakeNameFor(el.value); }
   else if (el.id === "nb-copy" && S.bakeForm) S.bakeForm.copyFrom = el.value;

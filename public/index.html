@@ -221,6 +221,7 @@ main{padding-block:24px 64px;display:flex;flex-direction:column;gap:20px}
 .bake-row.kid::before{content:"↳";position:absolute;left:4px;top:12px;color:var(--muted)}
 .shop-scope{margin:4px 0 12px}
 .shop-pick{display:flex;flex-wrap:wrap;gap:8px 18px;margin-bottom:12px}
+@media (max-width:640px){.person{grid-template-columns:1fr 1fr}.person .em{grid-column:1/-1;order:-1}}
 .photo-btns{display:flex;gap:8px;flex-wrap:wrap}
 .photo-btns label.btn{cursor:pointer}
 .status{display:flex;gap:10px;align-items:center;font-size:.9rem;padding:10px 12px;border-radius:8px;background:var(--surface-2)}
@@ -259,7 +260,7 @@ main{padding-block:24px 64px;display:flex;flex-direction:column;gap:20px}
 .bake-row .confirm{grid-column:1/-1}
 .bake-acts{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
 @media (max-width:560px){.bake-row{grid-template-columns:1fr}.bake-acts{justify-content:flex-start}}
-.person{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto;gap:10px;align-items:center;padding:10px 0;border-top:1px solid var(--line)}
+.person{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.2fr) minmax(0,1fr) auto;gap:10px;align-items:center;padding:10px 0;border-top:1px solid var(--line)}
 .person:first-of-type{border-top:0}
 .person .em{font-size:.85rem;color:var(--muted);overflow-wrap:anywhere}
 .person input{border:1px solid var(--line);background:var(--surface);border-radius:8px;padding:6px 9px;min-width:0}
