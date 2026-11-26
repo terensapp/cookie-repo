@@ -88,6 +88,28 @@ async function loadState() {
   } catch (e) { if (e.status !== 401) S.loadError = e.message; S.loaded = true; }
   render();
 }
+const byDate = (a, b) => String(a.bakeDate).localeCompare(String(b.bakeDate)) || String(a.name).localeCompare(String(b.name));
+/* The open bake's summary, kept in step with unsaved edits. */
+const liveBake = b => b.id === S.plan.id ? { ...b, name: S.plan.name, bakeDate: S.plan.bakeDate, partOf: S.plan.partOf || "", selections: S.plan.selections || {} } : b;
+const allBakes = () => S.bakes.map(liveBake);
+const mainOf = b => (b.partOf && S.bakes.some(x => x.id === b.partOf)) ? b.partOf : b.id;
+/* A main bake followed by its prebakes, in date order. */
+function family(id = S.plan.id) {
+  const all = allBakes(), me = all.find(b => b.id === id); if (!me) return [];
+  const main = all.find(b => b.id === mainOf(me));
+  return [main, ...all.filter(b => b.partOf === main.id && b.id !== main.id).sort(byDate)];
+}
+function shopBakeIds() {
+  const P = S.plan, all = allBakes();
+  if (P.shopScope === "event") return family().map(b => b.id);
+  if (P.shopScope === "custom") { const ids = (P.shopBakes || []).filter(id => all.some(b => b.id === id)); return ids.length ? ids : [P.id]; }
+  return [P.id];
+}
+/* Every cookie on the bakes this list covers, each with its own batch size and baker. */
+function shopSelections() {
+  const all = allBakes();
+  return shopBakeIds().flatMap(id => { const b = all.find(x => x.id === id); return Object.entries(b?.selections || {}).map(([rid, v]) => ({ r: getR(rid), scale: num(v && v.scale) || 1, baker: (v && v.baker) || "", bake: b.name })).filter(x => x.r); });
+}
 function applyBakes(d) {
   S.plan = { ...defaultPlan(), ...d.plan, bakeDate: d.plan?.bakeDate || defaultPlan().bakeDate };
   S.bakes = Array.isArray(d.bakes) ? d.bakes : S.bakes;
@@ -106,7 +128,7 @@ async function flushPlan() {
     // Keep each cookie's name with the bake, so a past bake still reads right if the recipe is later deleted.
     for (const [id, v] of Object.entries(S.plan.selections || {})) { const r = getR(id); if (r && v) v.name = r.name; }
     const sum = S.bakes.find(b => b.id === S.plan.id);
-    if (sum) { sum.name = S.plan.name; sum.bakeDate = S.plan.bakeDate; sum.cookies = Object.entries(S.plan.selections || {}).map(([id, v]) => getR(id)?.name || v?.name || "Deleted recipe"); }
+    if (sum) { sum.name = S.plan.name; sum.bakeDate = S.plan.bakeDate; sum.partOf = S.plan.partOf || ""; sum.selections = clone(S.plan.selections || {}); sum.cookies = Object.entries(S.plan.selections || {}).map(([id, v]) => getR(id)?.name || v?.name || "Deleted recipe"); }
     try { await api("PUT", `/api/bakes/${encodeURIComponent(S.plan.id)}`, S.plan); }
     catch (e) { writeErr(e); if (e.status === 404) { planWriting = false; loadState(); return; } break; }
   }
@@ -258,6 +280,7 @@ function buyHint(key, a) {
 }
 /* Pantry entries match a shopping item by name; "flour" in the pantry also matches "all-purpose flour" on the list. */
 function pantryFor(key) {
+  if (S.plan.usePantry === false) return null;
   const exact = S.pantry.filter(p => keyOf(p.item) === key && p.qty != null && p.qty !== "");
   const rows = exact.length ? exact : S.pantry.filter(p => { const k = keyOf(p.item); return k && p.qty != null && p.qty !== "" && (key.endsWith(" " + k) || k.endsWith(" " + key)); });
   if (!rows.length) return null;
@@ -283,13 +306,14 @@ function subtractPantry(key, need, have) {
 }
 function shopping(bakerFilter) {
   const map = new Map();
-  for (const { r, scale, baker } of selectedList()) {
+  const sels = shopSelections(), multi = new Set(sels.map(x => x.bake)).size > 1;
+  for (const { r, scale, baker, bake } of sels) {
     if (bakerFilter && baker !== bakerFilter) continue;
     for (const ing of (r.ingredients || [])) {
       const k = keyOf(ing.item); if (!k) continue;
       let e = map.get(k);
       if (!e) { e = { key: k, item: ing.item, category: CATS.includes(ing.category) ? ing.category : "Other", need: { vol: 0, wt: 0, each: 0, pinch: 0 }, asNeeded: false, from: new Set() }; map.set(k, e); }
-      e.from.add(r.name);
+      e.from.add(multi ? `${r.name} (${bake})` : r.name);
       if (ing.qty == null || ing.qty === "") { e.asNeeded = true; continue; }
       addAmount(e.need, num(ing.qty) * scale, ing.unit);
     }
@@ -321,7 +345,7 @@ function render() {
   for (const t of TABS) $(`#tab-${t}`).setAttribute("aria-selected", String(S.tab === t));
   $("#ct-recipes").textContent = S.loaded ? S.recipes.length : "";
   $("#ct-plan").textContent = sel.length || "";
-  const shopN = sel.length ? shopping().filter(g => !g.covered).reduce((a, g) => a + g.items.length, 0) : 0;
+  const shopN = shopSelections().length ? shopping().filter(g => !g.covered).reduce((a, g) => a + g.items.length, 0) : 0;
   $("#ct-shopping").textContent = shopN || "";
   const keep = preserve(main);
   const view = { recipes: viewRecipes, plan: viewPlan, shopping: viewShopping, settings: viewSettings }[S.tab] || viewRecipes;
@@ -435,8 +459,14 @@ function recipeResults() {
 }
 function viewPlan() {
   const P = S.plan, sel = selectedList(), sc = schedule();
+  const fam = family(), mainId = fam[0]?.id || P.id, isMain = mainId === P.id;
+  const tabsRow = `<div class="bake-tabs" role="group" aria-label="Bakes in this event">${fam.length > 1 ? fam.map(b => `<button class="bake-tab" data-act="${b.id === P.id ? "noop" : "bake-open"}" data-id="${esc(b.id)}" aria-pressed="${b.id === P.id}"><b>${esc(b.name)}</b><span>${b.id === mainId ? "Main bake" : "Prebake"} · ${esc(fmtDay(parseDate(b.bakeDate)))}</span></button>`).join("") : ""}<button class="btn sm" data-act="prebake-new" data-id="${esc(mainId)}">+ Add prebake</button></div>`;
+  const hasKids = S.bakes.some(b => b.partOf === P.id);
+  const mains = allBakes().filter(b => b.id !== P.id && !(b.partOf && S.bakes.some(x => x.id === b.partOf))).sort(byDate).reverse();
+  const partOfField = `<label class="field"><span class="label">Part of</span><select id="p-partof" data-change="plan" data-k="partOf" ${hasKids ? "disabled title=\"This bake has prebakes, so it stays a main bake\"" : ""}><option value="">Nothing (a main bake)</option>${mains.map(b => `<option value="${esc(b.id)}" ${P.partOf === b.id ? "selected" : ""}>Prebake for ${esc(b.name)}</option>`).join("")}</select></label>`;
   const settings = `<section class="panel"><div class="settings">
     <label class="field bake-name"><span class="label">Name</span><input id="p-name" class="inp" data-change="plan" data-k="name" value="${esc(P.name)}" maxlength="80" placeholder="${esc(bakeNameFor(P.bakeDate))}"></label>
+    ${partOfField}
     <label class="field"><span class="label">Bake day</span><input type="date" id="p-date" data-change="plan" data-k="bakeDate" value="${esc(P.bakeDate)}"></label>
     <label class="field"><span class="label">Start at</span><input type="time" id="p-start" data-change="plan" data-k="start" value="${esc(P.start)}"></label>
     <label class="field"><span class="label">Ovens</span><select id="p-ovens" data-change="plan" data-k="ovens">${[1, 2, 3].map(n => `<option ${num(P.ovens) === n ? "selected" : ""}>${n}</option>`).join("")}</select></label>
@@ -444,13 +474,13 @@ function viewPlan() {
     <label class="check"><input type="checkbox" id="p-ahead" data-change="plan" data-k="aheadAll" ${P.aheadAll ? "checked" : ""}>Mix doughs the night before when they keep</label>
   </div></section>`;
   const others = S.bakes.length - 1;
-  const head = `<div class="page-head"><div><h1>${esc(P.name || "Bake plan")}</h1><p class="muted">${esc(fmtDay(parseDate(P.bakeDate)))}${sel.length ? ` · ${sel.length} cookie${sel.length > 1 ? "s" : ""}` : ""}</p></div>
+  const head = `<div class="page-head"><div><h1>${esc(P.name || "Bake plan")}</h1><p class="muted">${!isMain ? `Prebake for ${esc(fam[0].name)} · ` : ""}${esc(fmtDay(parseDate(P.bakeDate)))}${sel.length ? ` · ${sel.length} cookie${sel.length > 1 ? "s" : ""}` : ""}</p></div>
     <button class="btn" data-act="bakes">${others > 0 ? `All bakes (${S.bakes.length})` : "All bakes"}</button><button class="btn primary" data-act="bake-new">New bake</button></div>`;
   const past = P.bakeDate < isoDate(new Date()) ? `<div class="banner">This bake was on ${esc(fmtDay(parseDate(P.bakeDate)))}. Changes here update that record. Planning the next one? <button class="btn sm" data-act="bake-copy" data-id="${esc(P.id)}">Start a new bake from this one</button></div>` : "";
   const gone = Object.entries(P.selections || {}).filter(([id]) => !getR(id));
   const goneNote = gone.length ? `<p class="muted" style="font-size:.88rem">Left off this plan: ${gone.map(([, v]) => esc(v?.name || "a recipe")).join(", ")} (no longer in the recipe box).</p>` : "";
   const notes = `<section class="panel"><div class="panel-head"><h2>Notes on this bake</h2></div><textarea id="p-notes" class="inp" rows="3" data-change="plan" data-k="notes" maxlength="5000" placeholder="How it went, what ran out, what to change next time">${esc(P.notes || "")}</textarea></section>`;
-  if (!sel.length) return head + past + settings + goneNote + `<div class="empty"><h2>Nothing on the baking list</h2><p class="muted">Pick recipes in the recipe box with “+ Bake”. You'll get a make-ahead list, which cookies can share the oven, and a timed bake-day schedule.</p><button class="btn primary" data-act="tab" data-tab="recipes">Choose recipes</button></div>` + notes;
+  if (!sel.length) return head + tabsRow + past + settings + goneNote + `<div class="empty"><h2>Nothing on the baking list</h2><p class="muted">Pick recipes in the recipe box with “+ Bake”. You'll get a make-ahead list, which cookies can share the oven, and a timed bake-day schedule.</p><button class="btn primary" data-act="tab" data-tab="recipes">Choose recipes</button></div>` + notes;
   const picked = `<section class="panel"><div class="panel-head"><h2>Baking</h2><span class="muted">${sc.sheets} sheet${sc.sheets > 1 ? "s" : ""} · ${sc.items.reduce((a, i) => a + i.count, 0)} cookies</span></div><div class="sel-list">${sc.items.map(it => `
     <div class="sel-row"><span class="dot" style="background:var(--c${it.color})"></span>
       <div style="min-width:0"><div class="nm"><a href="#" data-act="open" data-id="${esc(it.r.id)}" style="color:inherit">${esc(it.r.name)}</a></div><div class="sub">${it.count} cookies · ${it.sheets} sheet${it.sheets > 1 ? "s" : ""} of ${it.per} · ${it.temp}°F</div></div>
@@ -485,7 +515,7 @@ function viewPlan() {
   const rem = sel.filter(x => (x.r.notes || []).length);
   const reminders = rem.length ? `<section class="panel"><div class="panel-head"><h2>Notes from last time</h2></div><div class="notes">${rem.map(x => [...x.r.notes].slice(-2).reverse().map(n => `<div class="note"><span class="d">${esc(x.r.name)} · ${esc(fmtNoteDate(n.at))}${n.by ? ` · ${esc(personName(n.by))}` : ""}</span><p>${esc(n.text)}</p></div>`).join("")).join("")}</div></section>` : "";
 
-  return head + past + settings + picked + `<div class="two">${ahead}${share}</div>` + reminders + viewTimeline(sc) + notes;
+  return head + tabsRow + past + settings + picked + `<div class="two">${ahead}${share}</div>` + reminders + viewTimeline(sc) + notes;
 }
 function viewTimeline(sc) {
   const t0 = sc.T0, t1 = Math.max(sc.end, t0 + 60), span = t1 - t0;
@@ -533,11 +563,18 @@ function viewTimeline(sc) {
     <div>${agenda}</div></section>`;
 }
 function viewShopping() {
-  const sel = selectedList(), f = S.shopFilter;
+  const sel = shopSelections(), f = S.shopFilter, P = S.plan;
+  const fam = family(), ids = shopBakeIds(), all = allBakes(), scope = P.shopScope || "this";
+  const names = ids.map(id => all.find(b => b.id === id)?.name).filter(Boolean);
+  const scopeBar = `<div class="seg shop-scope" role="group" aria-label="Shopping list for">
+      <button data-act="shop-scope" data-scope="this" aria-pressed="${scope === "this"}">This bake</button>
+      ${fam.length > 1 ? `<button data-act="shop-scope" data-scope="event" aria-pressed="${scope === "event"}">${esc(fam[0].name)} + ${fam.length - 1} prebake${fam.length > 2 ? "s" : ""}</button>` : ""}
+      <button data-act="shop-scope" data-scope="custom" aria-pressed="${scope === "custom"}">Choose bakes</button></div>
+    ${scope === "custom" ? `<div class="panel shop-pick">${all.slice().sort(byDate).reverse().map(b => `<label class="check"><input type="checkbox" data-change="shop-bake" data-id="${esc(b.id)}" ${ids.includes(b.id) ? "checked" : ""}>${esc(b.name)} <span class="muted">· ${esc(fmtDay(parseDate(b.bakeDate)))}</span></label>`).join("")}</div>` : ""}`;
   const bakers = [...new Set(sel.map(x => x.baker).filter(Boolean))];
   const shown = f ? sel.filter(x => x.baker === f) : sel;
   const filter = bakers.length > 1 ? `<label class="who">For ${personSelect("shop-filter", f, `data-change="shop-filter"`, "Show one baker's shopping", "Everyone")}</label>` : "";
-  const head = `<div class="page-head"><div><h1>Shopping list</h1><p class="muted">${esc(S.plan.name || "This bake")} · ${shown.length ? `For ${shown.map(x => `${esc(x.r.name)}${x.scale !== 1 ? ` (${scaleLabel(x.scale)})` : ""}`).join(", ")}` : "Built from everything on the baking list"}</p></div>${filter}${sel.length ? `<button class="btn" data-act="copy-list">Copy list</button><button class="btn ghost" data-act="clear-have">Uncheck all</button>` : ""}</div>`;
+  const head = `<div class="page-head"><div><h1>Shopping list</h1><p class="muted">${names.length > 1 ? `Combining ${names.map(esc).join(", ")}` : esc(S.plan.name || "This bake")} · ${names.length > 1 ? `${shown.length} cookie batch${shown.length === 1 ? "" : "es"}` : shown.length ? `For ${shown.map(x => `${esc(x.r.name)}${x.scale !== 1 ? ` (${scaleLabel(x.scale)})` : ""}`).join(", ")}` : "Built from everything on the baking list"}</p></div>${filter}${sel.length ? `<button class="btn" data-act="copy-list">Copy list</button><button class="btn ghost" data-act="clear-have">Uncheck all</button>` : ""}</div>`;
   let list;
   if (!sel.length) list = `<div class="empty"><h2>No recipes picked yet</h2><p class="muted">Add cookies to the bake plan and their ingredients are combined here, scaled to your batch sizes, minus what's already in your pantry.</p><button class="btn primary" data-act="tab" data-tab="recipes">Choose recipes</button></div>`;
   else {
@@ -551,7 +588,7 @@ function viewShopping() {
       return `<label class="shop-row ${have[e.key] || e.status === "covered" ? "have" : ""}" for="${esc(id)}"><input type="checkbox" id="${esc(id)}" data-change="have" data-key="${esc(e.key)}" ${have[e.key] || e.status === "covered" ? "checked" : ""} ${e.status === "covered" ? "disabled" : ""}><div style="min-width:0"><div class="it">${esc(e.item)}</div><div class="from">${fromTxt}</div>${pantryTxt ? `<div class="from" style="color:var(--good)">${pantryTxt}</div>` : ""}</div><div class="amt">${esc(amt)}${e.hint ? `<span class="hint">${esc(e.hint)}</span>` : ""}</div></label>`;
     }).join("")}</div>`).join("")}</section>`;
   }
-  return head + `<div class="two" style="align-items:start">${list}${viewPantry()}</div>`;
+  return head + scopeBar + `<div class="two" style="align-items:start">${list}${viewPantry()}</div>`;
 }
 function viewPantry() {
   const rows = S.pantry.map((p, i) => `<div class="ing-row" style="grid-template-columns:64px 76px minmax(0,1fr) 30px">
@@ -561,6 +598,8 @@ function viewPantry() {
       <button class="x" data-act="pantry-del" data-i="${i}" aria-label="Remove ${esc(p.item || "item")}" style="font-size:1.1rem">×</button></div>`).join("");
   return `<section class="panel"><div class="panel-head"><h2>Pantry</h2><span class="muted">${S.pantry.length} item${S.pantry.length === 1 ? "" : "s"}</span></div>
     <p class="muted" style="font-size:.88rem">What you already have. It's subtracted from the shopping list, converting cups and pounds for flour, sugar and butter.</p>
+    <label class="check"><input type="checkbox" data-change="plan" data-k="usePantry" ${S.plan.usePantry === false ? "" : "checked"}>Subtract the pantry from this list</label>
+    ${S.plan.usePantry === false ? `<p class="muted" style="font-size:.85rem">Off for ${esc(S.plan.name || "this bake")}, e.g. when someone shops from their own kitchen.</p>` : ""}
     <div class="ing-edit">${rows || `<p class="muted" style="font-size:.9rem">Nothing in the pantry yet.</p>`}<div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn sm" data-act="pantry-add">+ Add item</button>${S.pantry.length ? `<button class="btn ghost sm" data-act="pantry-clear">Clear pantry</button>` : ""}</div></div>
     ${S.confirmPantryClear ? `<div class="confirm"><span>Remove all ${S.pantry.length} pantry items?</span><button class="btn danger solid sm" data-act="pantry-clear-yes">Clear</button><button class="btn sm" data-act="pantry-clear-no">Keep</button></div>` : ""}
     <label class="field"><span class="label">Paste a list, one item per line</span><textarea id="pantry-paste" rows="4" class="inp" placeholder="5 lb all-purpose flour&#10;2 sticks unsalted butter&#10;12 large eggs&#10;1 cup chocolate chips"></textarea></label>
@@ -594,30 +633,35 @@ function renderModal() {
   if (draft != null && document.getElementById("noteDraft")) document.getElementById("noteDraft").value = draft;
   el.hidden = false; document.body.style.overflow = "hidden";
 }
-function newBakeForm(copyFrom) {
-  const d = defaultPlan().bakeDate;
-  return { name: "", bakeDate: d, copyFrom: copyFrom || "" };
+function newBakeForm(copyFrom, partOf) {
+  let d = defaultPlan().bakeDate;
+  const main = partOf && S.bakes.find(b => b.id === partOf);
+  if (main) { const x = parseDate(main.bakeDate); x.setDate(x.getDate() - 1); d = isoDate(x); }
+  return { name: "", bakeDate: d, copyFrom: copyFrom || "", partOf: partOf || "" };
 }
 function viewBakes() {
   const f = S.bakeForm, today = isoDate(new Date());
   const opts = `<option value="">Start empty</option>` + S.bakes.map(b => `<option value="${esc(b.id)}" ${f && f.copyFrom === b.id ? "selected" : ""}>Same cookies as ${esc(b.name)}</option>`).join("");
   const form = f ? `<form class="bake-form panel" data-form="bake">
-      <h3>New bake</h3>
+      <h3>${f && f.partOf ? "New prebake" : "New bake"}</h3>
       <div class="settings">
-        <label class="field bake-name"><span class="label">Name</span><input id="nb-name" class="inp" maxlength="80" value="${esc(f.name)}" placeholder="${esc(bakeNameFor(f.bakeDate))}"></label>
+        <label class="field bake-name"><span class="label">Name</span><input id="nb-name" class="inp" maxlength="80" value="${esc(f.name)}" placeholder="${esc(f.partOf ? "e.g. Sapp prebake" : bakeNameFor(f.bakeDate))}"></label>
         <label class="field"><span class="label">Bake day</span><input id="nb-date" type="date" class="inp" value="${esc(f.bakeDate)}" required></label>
         <label class="field"><span class="label">Cookies</span><select id="nb-copy" class="inp">${opts}</select></label>
+        <label class="field"><span class="label">Part of</span><select id="nb-partof" class="inp"><option value="">Nothing (a main bake)</option>${allBakes().filter(b => !(b.partOf && S.bakes.some(x => x.id === b.partOf))).sort(byDate).reverse().map(b => `<option value="${esc(b.id)}" ${f.partOf === b.id ? "selected" : ""}>Prebake for ${esc(b.name)}</option>`).join("")}</select></label>
       </div>
       <p class="muted" style="font-size:.85rem">Copying brings over the cookies, batch sizes, bakers and oven setup. The shopping list starts fresh and you can change anything.</p>
       <div style="display:flex;gap:8px"><button class="btn primary">Create bake</button><button type="button" class="btn ghost" data-act="bake-form-cancel">Cancel</button></div>
     </form>` : `<div><button class="btn primary" data-act="bake-new">New bake</button></div>`;
-  const rows = S.bakes.map(b => {
+  const isKid = b => b.partOf && S.bakes.some(x => x.id === b.partOf);
+  const ordered = S.bakes.filter(b => !isKid(b)).flatMap(m => [m, ...S.bakes.filter(k => k.partOf === m.id).sort(byDate)]);
+  const rows = ordered.map(b => {
     const open = b.id === S.plan.id, when = b.bakeDate < today ? "past" : "upcoming";
     const cookies = b.cookies.length ? `${b.cookies.length} cookie${b.cookies.length > 1 ? "s" : ""}: ${b.cookies.slice(0, 4).map(esc).join(", ")}${b.cookies.length > 4 ? `, +${b.cookies.length - 4} more` : ""}` : "No cookies picked";
-    const confirm = S.confirmBake === b.id ? `<div class="confirm"><span>Delete ${esc(b.name)}, its plan and its shopping checks? Recipes aren't affected.</span><button class="btn danger solid sm" data-act="bake-del-yes" data-id="${esc(b.id)}">Delete</button><button class="btn sm" data-act="bake-del-no">Keep it</button></div>` : "";
-    return `<div class="bake-row ${open ? "open" : ""}">
+    const confirm = S.confirmBake === b.id ? `<div class="confirm"><span>Delete ${esc(b.name)}, its plan and its shopping checks? Recipes aren't affected.${S.bakes.some(k => k.partOf === b.id) ? " Its prebakes are kept as bakes of their own." : ""}</span><button class="btn danger solid sm" data-act="bake-del-yes" data-id="${esc(b.id)}">Delete</button><button class="btn sm" data-act="bake-del-no">Keep it</button></div>` : "";
+    return `<div class="bake-row ${open ? "open" : ""} ${isKid(b) ? "kid" : ""}">
       <div style="min-width:0"><div class="nm">${esc(b.name)}${open ? ` <span class="chip">Open</span>` : ""}</div>
-        <div class="sub">${esc(fmtDay(parseDate(b.bakeDate)))} · ${when}${b.bakers.length ? ` · ${b.bakers.map(e => esc(personName(e))).join(", ")}` : ""}</div>
+        <div class="sub">${isKid(b) ? "Prebake · " : S.bakes.some(k => k.partOf === b.id) ? "Main bake · " : ""}${esc(fmtDay(parseDate(b.bakeDate)))} · ${when}${b.bakers.length ? ` · ${b.bakers.map(e => esc(personName(e))).join(", ")}` : ""}</div>
         <div class="sub">${cookies}</div></div>
       <div class="bake-acts">${open ? "" : `<button class="btn sm" data-act="bake-open" data-id="${esc(b.id)}">Open</button>`}<button class="btn sm ghost" data-act="bake-copy" data-id="${esc(b.id)}">Copy</button><button class="btn sm ghost danger" data-act="bake-del" data-id="${esc(b.id)}" style="border-color:transparent">Delete</button></div>
       ${confirm}</div>`;
@@ -907,6 +951,9 @@ document.addEventListener("click", async e => {
   else if (a === "search-clear") { S.q = ""; S.ownerFilter = ""; render(); $("#recipe-q")?.focus(); }
   else if (a === "bakes") { S.bakeForm = null; S.confirmBake = null; openModal({ type: "bakes" }); }
   else if (a === "bake-new" || a === "bake-copy") { S.bakeForm = newBakeForm(a === "bake-copy" ? id : ""); S.confirmBake = null; if (S.modal?.type === "bakes") renderModal(); else openModal({ type: "bakes" }); $("#nb-name")?.focus(); }
+  else if (a === "prebake-new") { S.bakeForm = newBakeForm("", id); S.confirmBake = null; openModal({ type: "bakes" }); $("#nb-name")?.focus(); }
+  else if (a === "noop") {}
+  else if (a === "shop-scope") { S.plan.shopScope = el.dataset.scope; if (el.dataset.scope === "custom" && !(S.plan.shopBakes || []).length) S.plan.shopBakes = family().map(b => b.id); S.shopFilter = ""; savePlan(); }
   else if (a === "bake-form-cancel") { S.bakeForm = null; renderModal(); }
   else if (a === "bake-open") { if (await bakeCall("POST", `/api/bakes/${encodeURIComponent(id)}/open`, null)) { closeModal(); toast(`Opened ${S.plan.name}`); if (S.tab !== "shopping") go("plan"); } }
   else if (a === "bake-del") { S.confirmBake = id; renderModal(); }
@@ -945,6 +992,8 @@ document.addEventListener("change", e => {
   else if (c === "scale") { setScale(el.dataset.id, el.value); if (S.modal?.type === "detail") renderModal(); }
   else if (el.id === "nb-date" && S.bakeForm) { S.bakeForm.bakeDate = el.value; const n = $("#nb-name"); if (n) n.placeholder = bakeNameFor(el.value); }
   else if (el.id === "nb-copy" && S.bakeForm) S.bakeForm.copyFrom = el.value;
+  else if (el.id === "nb-partof" && S.bakeForm) { S.bakeForm.partOf = el.value; S.bakeForm.name = $("#nb-name").value; renderModal(); }
+  else if (c === "shop-bake") { const set = new Set(S.plan.shopBakes?.length ? S.plan.shopBakes : [S.plan.id]); if (el.checked) set.add(el.dataset.id); else set.delete(el.dataset.id); S.plan.shopBakes = [...set]; savePlan(); }
   else if (c === "plan") { const k = el.dataset.k; S.plan[k] = el.type === "checkbox" ? el.checked : (["ovens", "sheetsPerOven"].includes(k) ? Number(el.value) : el.value); savePlan(); }
   else if (c === "have") { S.plan.have = { ...(S.plan.have || {}) }; if (el.checked) S.plan.have[el.dataset.key] = true; else delete S.plan.have[el.dataset.key]; savePlan(); }
   else if (el.id === "imp-file" || el.id === "imp-cam") { addFiles(el.files); el.value = ""; }
@@ -979,9 +1028,9 @@ document.addEventListener("submit", async e => {
   else if (form === "code") submitCode($("#login-code").value);
   else if (form === "bake") {
     const f = S.bakeForm; if (!f) return;
-    f.name = $("#nb-name").value.trim(); f.bakeDate = $("#nb-date").value; f.copyFrom = $("#nb-copy").value;
+    f.name = $("#nb-name").value.trim(); f.bakeDate = $("#nb-date").value; f.copyFrom = $("#nb-copy").value; f.partOf = $("#nb-partof").value;
     if (!f.bakeDate) { toast("Pick a date for the bake."); return; }
-    if (await bakeCall("POST", "/api/bakes", { name: f.name || bakeNameFor(f.bakeDate), bakeDate: f.bakeDate, copyFrom: f.copyFrom || undefined })) {
+    if (await bakeCall("POST", "/api/bakes", { name: f.name || (f.partOf ? "Prebake" : bakeNameFor(f.bakeDate)), bakeDate: f.bakeDate, copyFrom: f.copyFrom || undefined, partOf: f.partOf || undefined })) {
       S.bakeForm = null; closeModal(); toast(`${S.plan.name} is ready`); go("plan");
     }
   }

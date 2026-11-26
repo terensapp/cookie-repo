@@ -212,6 +212,15 @@ main{padding-block:24px 64px;display:flex;flex-direction:column;gap:20px}
 .search-bar{display:flex;gap:10px 14px;align-items:center;flex-wrap:wrap;margin:4px 0 14px}
 .search-bar #recipe-q{flex:1 1 260px;font-size:1rem;padding:9px 12px}
 .card .why{font-size:.82rem;color:var(--muted);overflow-wrap:anywhere}
+.bake-tabs{display:flex;gap:8px;flex-wrap:wrap;align-items:stretch;margin:2px 0 14px}
+.bake-tab{display:flex;flex-direction:column;align-items:flex-start;gap:1px;border:1px solid var(--line);background:var(--surface);border-radius:10px;padding:7px 12px;cursor:pointer;text-align:left;font:inherit;color:inherit}
+.bake-tab span{font-size:.78rem;color:var(--muted)}
+.bake-tab[aria-pressed="true"]{border-color:var(--accent);background:var(--accent-soft);cursor:default}
+.bake-tabs > .btn{align-self:center}
+.bake-row.kid{padding-left:22px;position:relative}
+.bake-row.kid::before{content:"↳";position:absolute;left:4px;top:12px;color:var(--muted)}
+.shop-scope{margin:4px 0 12px}
+.shop-pick{display:flex;flex-wrap:wrap;gap:8px 18px;margin-bottom:12px}
 .photo-btns{display:flex;gap:8px;flex-wrap:wrap}
 .photo-btns label.btn{cursor:pointer}
 .status{display:flex;gap:10px;align-items:center;font-size:.9rem;padding:10px 12px;border-radius:8px;background:var(--surface-2)}

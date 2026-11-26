@@ -136,7 +136,9 @@ function bakeList() {
     const b = JSON.parse(row.data);
     const cookies = Object.entries(b.selections || {}).map(([id, v]) => names.get(id) || v?.name || "Deleted recipe");
     const bakers = [...new Set(Object.values(b.selections || {}).map((v) => v?.baker).filter(Boolean))];
-    return { id: b.id, name: b.name, bakeDate: b.bakeDate, cookies, bakers, createdAt: row.created_at };
+    // Selections ride along so a shopping list can combine several bakes.
+    const selections = Object.fromEntries(Object.entries(b.selections || {}).map(([id, v]) => [id, { scale: v?.scale, baker: v?.baker || "", name: v?.name || names.get(id) || "" }]));
+    return { id: b.id, name: b.name, bakeDate: b.bakeDate, partOf: b.partOf || "", cookies, bakers, selections, createdAt: row.created_at };
   }).sort((a, b) => String(b.bakeDate).localeCompare(String(a.bakeDate)) || String(b.createdAt).localeCompare(String(a.createdAt)));
 }
 /* The bake a person has open; new people land on the most recent one. */
@@ -198,7 +200,22 @@ function cleanBake(body, id) {
   b.notes = String(b.notes || "").slice(0, 5000);
   if (!isPlainObject(b.selections)) b.selections = {};
   if (!isPlainObject(b.have)) b.have = {};
+  b.partOf = mainBakeId(b.partOf, id);
+  b.shopScope = ["this", "event", "custom"].includes(b.shopScope) ? b.shopScope : "this";
+  b.shopBakes = Array.isArray(b.shopBakes) ? b.shopBakes.filter((x) => typeof x === "string" && ID_RE.test(x)).slice(0, 50) : [];
+  b.usePantry = b.usePantry !== false;
   return b;
+}
+/* Prebakes hang off one main bake, one level deep: pointing at a prebake means its main bake. */
+function mainBakeId(partOf, selfId) {
+  if (!partOf || typeof partOf !== "string" || partOf === selfId) return "";
+  const parent = getBake(partOf);
+  if (!parent) return "";
+  const top = parent.partOf && parent.partOf !== selfId && getBake(parent.partOf) ? parent.partOf : parent.id;
+  if (top === selfId) return "";
+  // A bake that already has its own prebakes stays a main bake.
+  if (bakeList().some((b) => b.partOf === selfId)) return "";
+  return top;
 }
 
 app.put("/api/bakes/:id", (req, res) => {
@@ -212,12 +229,13 @@ app.put("/api/bakes/:id", (req, res) => {
 
 /* New bake, empty or with the cookies, batch sizes, bakers and oven setup of an earlier one. */
 app.post("/api/bakes", (req, res) => {
-  const { name, bakeDate, copyFrom } = req.body || {};
+  const { name, bakeDate, copyFrom, partOf } = req.body || {};
   if (!DATE_RE.test(bakeDate || "")) return res.status(400).json({ error: "Pick a date for the bake." });
   const src = copyFrom ? getBake(String(copyFrom)) : null;
   if (copyFrom && !src) return res.status(404).json({ error: "The bake to copy from was deleted." });
   const carry = src ? { start: src.start, ovens: src.ovens, sheetsPerOven: src.sheetsPerOven, aheadAll: src.aheadAll, selections: Object.fromEntries(Object.entries(src.selections || {}).filter(([id]) => recipeExists(id)).map(([id, v]) => [id, { ...v }])) } : {};
   const b = createBake({ ...carry, name: String(name || "").trim().slice(0, 80) || bakeName(bakeDate), bakeDate });
+  if (partOf) { b.partOf = mainBakeId(String(partOf), b.id); putBake(b); }
   setKV(`open:${req.email}`, b.id);
   res.json(bakeState(req.email));
 });
@@ -230,6 +248,8 @@ app.post("/api/bakes/:id/open", (req, res) => {
 
 app.delete("/api/bakes/:id", (req, res) => {
   db.prepare("DELETE FROM bakes WHERE id = ?").run(req.params.id);
+  // Its prebakes stay, as bakes of their own.
+  for (const s of bakeList().filter((b) => b.partOf === req.params.id)) { const b = getBake(s.id); b.partOf = ""; putBake(b); }
   res.json(bakeState(req.email));
 });
 
