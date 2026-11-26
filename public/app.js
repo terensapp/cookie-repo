@@ -390,16 +390,48 @@ function viewRecipes() {
   const head = `<div class="page-head"><div><h1>Recipe box</h1><p class="muted">Tap “Bake” on the cookies you're making. The plan and shopping list build themselves.</p></div><button class="btn primary" data-act="import">+ Add recipe</button></div>`;
   if (!S.loaded) return head + `<div class="empty"><div class="spin"></div><p class="muted">Opening your recipe box…</p></div>`;
   if (!S.recipes.length) return head + `<div class="empty"><h2>No recipes yet</h2><p class="muted">Paste a link, snap a photo of a recipe card, or paste the text. Claude reads the ingredients, times and oven temperature, and you check them before saving.</p><div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center"><button class="btn primary" data-act="import">Add your first recipe</button><button class="btn" data-act="examples">Load 3 example recipes</button></div></div>`;
-  const cards = S.recipes.map(r => {
+  const owners = [...new Set(S.recipes.map(r => r.owner).filter(Boolean))];
+  const bar = `<div class="search-bar"><input id="recipe-q" type="search" class="inp" placeholder="Search names, ingredients, notes…" aria-label="Search recipes" value="${esc(S.q || "")}" autocomplete="off">
+    ${owners.length > 1 ? `<label class="who">Owner ${personSelect("recipe-owner", S.ownerFilter || "", `data-change="owner-filter"`, "Filter by owner", "Anyone")}</label>` : ""}</div>`;
+  return head + bar + `<div id="recipe-results">${recipeResults()}</div>`;
+}
+/* Every word has to appear somewhere in the recipe: its name, ingredients, notes, owner, source, steps or tips. */
+const fold = t => String(t || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+function matchRecipe(r, words) {
+  if (!words.length) return { ok: true };
+  const fields = [
+    ["name", r.name], ["ingredient", (r.ingredients || []).map(g => g.item).join(" · ")], ["note", (r.notes || []).map(n => n.text).join(" · ")],
+    ["owner", personName(r.owner)], ["source", [r.source, r.link && hostOf(r.link)].join(" ")], ["method", [(r.steps || []).join(" "), r.decorating, r.makeAheadTip].join(" ")],
+  ].map(([k, v]) => [k, String(v || ""), fold(v)]);
+  const all = fields.map(f => f[2]).join(" ");
+  if (!words.every(w => all.includes(w))) return { ok: false };
+  const rest = words.filter(w => !fields[0][2].includes(w)); // words the name doesn't explain
+  if (!rest.length) return { ok: true };
+  // Prefer a field holding all of them ("sea salt" in a note beats "salt" in the ingredients), and the phrase itself.
+  const phrase = rest.join(" ");
+  const pick = fields.slice(1).find(f => f[2].includes(phrase)) || fields.slice(1).find(f => rest.every(w => f[2].includes(w))) || fields.slice(1).find(f => rest.some(w => f[2].includes(w)));
+  if (!pick) return { ok: true };
+  const [k, raw] = pick, hit = t => rest.some(w => fold(t).includes(w));
+  if (k === "ingredient") return { ok: true, why: `Has ${(r.ingredients || []).map(g => g.item).filter(hit).slice(0, 3).join(", ")}` };
+  if (k === "note") { const n = (r.notes || []).find(n => fold(n.text).includes(phrase)) || (r.notes || []).find(n => hit(n.text)); return { ok: true, why: `Note: ${n.text.length > 70 ? n.text.slice(0, 70) + "…" : n.text}` }; }
+  return { ok: true, why: k === "owner" ? `Owner: ${raw}` : k === "source" ? `From ${raw.trim()}` : "Mentioned in the method" };
+  return { ok: true };
+}
+function recipeResults() {
+  const words = fold(S.q).split(/\s+/).filter(Boolean);
+  const hits = S.recipes.filter(r => !S.ownerFilter || r.owner === S.ownerFilter).map(r => ({ r, m: matchRecipe(r, words) })).filter(x => x.m.ok);
+  if (!hits.length) return `<div class="empty"><h2>No recipes match</h2><p class="muted">${S.q ? `Nothing has “${esc(S.q)}”${S.ownerFilter ? ` for ${esc(personName(S.ownerFilter))}` : ""}. Try fewer words, or an ingredient.` : "No recipes for that owner yet."}</p><button class="btn" data-act="search-clear">Clear search</button></div>`;
+  const count = words.length || S.ownerFilter ? `<p class="muted" style="font-size:.88rem;margin-bottom:10px">${hits.length} of ${S.recipes.length} recipes</p>` : "";
+  const cards = hits.map(({ r, m }) => {
     const on = !!S.plan.selections?.[r.id], nN = (r.notes || []).length;
     return `<article class="card ${on ? "on" : ""}" data-act="open" data-id="${esc(r.id)}" tabindex="0" role="button" aria-label="Open ${esc(r.name)}">
       <div class="card-top"><h3>${esc(r.name || "Untitled")}</h3>${r.example ? `<span class="chip ex">Example</span>` : ""}</div>
-      <div class="chips">${recipeChips(r)}</div>
+      <div class="chips">${recipeChips(r)}</div>${m.why ? `<p class="why">${esc(m.why)}</p>` : ""}
       <div class="card-foot"><span class="muted">${r.owner ? `${esc(personName(r.owner))} · ` : ""}${nN ?`${nN} note${nN > 1 ? "s" : ""}` : (r.ingredients || []).length + " ingredients"}${on ? ` · ${scaleLabel(scaleOf(r.id))}` : ""}</span>
       <button class="toggle" data-act="toggle" data-id="${esc(r.id)}" aria-pressed="${on}">${on ? "✓ Baking" : "+ Bake"}</button></div>
     </article>`;
   }).join("");
-  return head + `<div class="grid">${cards}</div>`;
+  return count + `<div class="grid">${cards}</div>`;
 }
 function viewPlan() {
   const P = S.plan, sel = selectedList(), sc = schedule();
@@ -872,6 +904,7 @@ document.addEventListener("click", async e => {
   }
   else if (a === "clear-have") { S.plan.have = {}; savePlan(); }
   else if (a === "reload") loadState();
+  else if (a === "search-clear") { S.q = ""; S.ownerFilter = ""; render(); $("#recipe-q")?.focus(); }
   else if (a === "bakes") { S.bakeForm = null; S.confirmBake = null; openModal({ type: "bakes" }); }
   else if (a === "bake-new" || a === "bake-copy") { S.bakeForm = newBakeForm(a === "bake-copy" ? id : ""); S.confirmBake = null; if (S.modal?.type === "bakes") renderModal(); else openModal({ type: "bakes" }); $("#nb-name")?.focus(); }
   else if (a === "bake-form-cancel") { S.bakeForm = null; renderModal(); }
@@ -904,6 +937,7 @@ document.addEventListener("keydown", e => {
 document.addEventListener("change", e => {
   const el = e.target, c = el.dataset.change;
   if (c === "baker") setBaker(el.dataset.id, el.value);
+  else if (c === "owner-filter") { S.ownerFilter = el.value; render(); }
   else if (c === "baker-filter") { S.bakerFilter = el.value; render(); }
   else if (c === "shop-filter") { S.shopFilter = el.value; render(); }
   else if (c === "person-name") peopleCall("PATCH", `/api/people/${encodeURIComponent(el.dataset.email)}`, { name: el.value });
@@ -919,6 +953,7 @@ document.addEventListener("change", e => {
   else if (el.dataset.ing != null && el.tagName === "SELECT") S.modal.draft.ingredients[Number(el.dataset.ing)][el.dataset.k] = el.value;
 });
 document.addEventListener("input", e => {
+  if (e.target.id === "recipe-q") { S.q = e.target.value; const box = $("#recipe-results"); if (box) box.innerHTML = recipeResults(); return; }
   const el = e.target, d = S.modal?.draft;
   if (el.id === "imp-url") IMP.url = el.value; else if (el.id === "imp-text") IMP.text = el.value;
   if (!d) return;
