@@ -57,7 +57,7 @@ export async function fetchRecipePage(raw) {
       res = await fetch(url, {
         redirect: "manual",
         signal: AbortSignal.timeout(15000),
-        headers: { "User-Agent": "Mozilla/5.0 (compatible; CookieTin/1.0; recipe reader)", Accept: "text/html,application/xhtml+xml" },
+        headers: { "User-Agent": "Mozilla/5.0 (compatible; CookieRepo/1.0; recipe reader)", Accept: "text/html,application/xhtml+xml" },
       });
     } catch {
       throw new ExtractError("That page didn't respond. Check the address, or paste the recipe text instead.", 502);

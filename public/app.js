@@ -66,7 +66,7 @@ async function api(method, url, body) {
   let res;
   try {
     res = await fetch(url, { method, headers: body ? { "Content-Type": "application/json" } : {}, body: body ? JSON.stringify(body) : undefined, credentials: "same-origin" });
-  } catch { throw { status: 0, message: "Can't reach Cookie Tin. Check your connection and try again." }; }
+  } catch { throw { status: 0, message: "Can't reach Cookie Repo. Check your connection and try again." }; }
   const data = await res.json().catch(() => ({}));
   if (res.status === 401 && !url.startsWith("/api/auth/")) { S.signedIn = false; S.loaded = true; render(); }
   if (!res.ok) throw { status: res.status, message: data.error || "Something went wrong. Try again." };
@@ -308,7 +308,7 @@ function viewLogin() {
     <form data-form="code"><label class="field"><span class="label">Code</span><input id="login-code" class="code" inputmode="numeric" autocomplete="one-time-code" maxlength="7" required></label>${msg}
     <button class="btn primary" ${L.busy ? "disabled" : ""}>Sign in</button></form>
     <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn ghost sm" data-act="login-resend" ${L.busy ? "disabled" : ""}>Send a new code</button><button class="btn ghost sm" data-act="login-back">Use a different email</button></div></section>`;
-  return `<section class="login panel"><h1>Sign in to Cookie Tin</h1><p class="muted">Enter your email. If it's on the household list, we'll send you a sign-in code.</p>
+  return `<section class="login panel"><h1>Sign in to Cookie Repo</h1><p class="muted">Enter your email. If it's on the household list, we'll send you a sign-in code.</p>
     <form data-form="email"><label class="field"><span class="label">Email</span><input id="login-email" type="email" autocomplete="email" required value="${esc(L.email)}"></label>${msg}
     <button class="btn primary" ${L.busy ? "disabled" : ""}>Email me a code</button></form></section>`;
 }
@@ -569,7 +569,7 @@ async function runExtract(payload, busyMsg) {
   } catch (e) {
     S.importCtl = null; IMP.busy = false;
     if (e.name === "AbortError") IMP.msg = "";
-    else { IMP.err = true; IMP.msg = e.message === "Failed to fetch" ? "Can't reach Cookie Tin. Check your connection and try again." : e.message; }
+    else { IMP.err = true; IMP.msg = e.message === "Failed to fetch" ? "Can't reach Cookie Repo. Check your connection and try again." : e.message; }
     if (S.modal?.type === "import") renderModal();
   }
 }

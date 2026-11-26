@@ -1,4 +1,4 @@
-# Cookie Tin
+# Cookie Repo
 
 A cookie recipe box, bake-day planner and shopping list for a household.
 
@@ -22,9 +22,10 @@ Recipe links are fetched by the server (private network addresses are refused) a
 |---|---|
 | `ANTHROPIC_API_KEY` | Claude API key, used to read recipes |
 | `RESEND_API_KEY` | Sends sign-in codes |
-| `EMAIL_FROM` | Sender, e.g. `Cookie Tin <cookies@yourdomain.com>`. Defaults to Resend's test sender, which only delivers to the Resend account owner's address |
+| `EMAIL_FROM` | Sender, e.g. `Cookie Repo <hello@cookierepo.com>`. Defaults to Resend's test sender, which only delivers to the Resend account owner's address |
 | `SESSION_SECRET` | Long random string used to sign sessions and codes |
 | `BOOTSTRAP_EMAILS` | Comma-separated addresses allowed in on first start, when the list is empty |
+| `CANONICAL_HOST` | Optional, e.g. `cookierepo.com`: every other hostname (www, the fly.dev address) redirects here |
 | `CLAUDE_MODEL` | Optional; defaults to `claude-opus-5-5` |
 | `DATABASE_PATH` | SQLite file; `/data/cookie-tin.db` on Fly |
 
@@ -53,3 +54,15 @@ fly volumes create cookie_tin_data --region ord --size 1
 fly secrets set ANTHROPIC_API_KEY=... RESEND_API_KEY=... SESSION_SECRET="$(openssl rand -hex 32)" BOOTSTRAP_EMAILS=you@example.com
 fly deploy
 ```
+
+The Fly app, volume and database file keep their original `cookie-tin` names; renaming them would mean moving the data to a new app.
+
+### Custom domain
+
+```bash
+fly certs add cookierepo.com
+fly certs add www.cookierepo.com
+fly ips list   # A and AAAA records for the apex domain
+```
+
+Once the certificates are issued, `fly secrets set CANONICAL_HOST=cookierepo.com` sends every other address to the main one.

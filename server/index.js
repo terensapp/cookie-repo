@@ -15,6 +15,17 @@ app.set("trust proxy", 1);
 app.disable("x-powered-by");
 auth.seedAllowed();
 
+/* ---------- one public address ----------
+   With CANONICAL_HOST set (e.g. cookierepo.com), other hostnames such as
+   www.cookierepo.com or cookie-tin.fly.dev redirect there. Health checks are left alone. */
+const CANONICAL_HOST = (process.env.CANONICAL_HOST || "").trim().toLowerCase();
+if (CANONICAL_HOST) {
+  app.use((req, res, next) => {
+    if (req.path === "/healthz" || (req.get("host") || "").toLowerCase() === CANONICAL_HOST) return next();
+    res.redirect(301, `https://${CANONICAL_HOST}${req.originalUrl}`);
+  });
+}
+
 /* ---------- security headers ---------- */
 app.use((req, res, next) => {
   res.set({
@@ -198,4 +209,4 @@ app.get("/healthz", (req, res) => res.send("ok"));
 app.use(express.static(path.join(here, "..", "public"), { extensions: ["html"], maxAge: "5m" }));
 app.get("/{*any}", (req, res) => res.sendFile(path.join(here, "..", "public", "index.html")));
 
-app.listen(PORT, () => console.log(`Cookie Tin listening on :${PORT}`));
+app.listen(PORT, () => console.log(`Cookie Repo listening on :${PORT}`));

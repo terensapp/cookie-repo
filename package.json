@@ -1,5 +1,5 @@
 {
-  "name": "cookie-tin",
+  "name": "cookie-repo",
   "version": "1.0.0",
   "private": true,
   "description": "Cookie recipe box, bake-day planner and shopping list, with Claude reading recipes from links, photos and text.",
