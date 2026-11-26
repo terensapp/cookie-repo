@@ -238,7 +238,7 @@ app.post("/api/extract", wrap(async (req, res) => {
     if (String(text).trim().length < 40) return res.status(400).json({ error: "Paste the full recipe, including the ingredient list." });
     source = { text: String(text).slice(0, 80000) };
   } else if (kind === "images") {
-    const imgs = Array.isArray(images) ? images.slice(0, 5) : [];
+    const imgs = Array.isArray(images) ? images.slice(0, 8) : [];
     if (!imgs.length || imgs.some((i) => !IMAGE_TYPES.includes(i?.media_type) || typeof i.data !== "string")) {
       return res.status(400).json({ error: "Send JPEG, PNG, WebP or GIF photos." });
     }

@@ -61,7 +61,8 @@ const S = {
   modal: null, viewScale: {}, confirmDelete: null, bakerFilter: "", shopFilter: "",
   login: { step: "email", email: "", busy: false, msg: "", err: false },
 };
-const IMG_MAX = 5;
+const IMG_MAX = 8;
+const TOUCH = matchMedia("(pointer: coarse)").matches;
 
 /* ---------- server ---------- */
 async function api(method, url, body) {
@@ -615,7 +616,16 @@ function viewImport() {
   const tabs = [["link", "Link"], ["photo", "Photo"], ["text", "Paste text"], ["manual", "Type it in"]];
   let body = "";
   if (IMP.mode === "link") body = `<div class="field"><label class="label" for="imp-url">Recipe web address</label><input id="imp-url" type="url" class="inp" placeholder="https://…" value="${esc(IMP.url)}"></div><p class="muted" style="font-size:.85rem">Some sites block automated readers. If one does, take a screenshot and use Photo, or paste the text.</p><div><button class="btn primary" data-act="imp-link" ${IMP.busy ? "disabled" : ""}>Read recipe</button></div>`;
-  if (IMP.mode === "photo") body = `<label class="drop" id="drop" for="imp-file"><b>Choose or drop photos</b><span class="muted" style="font-size:.88rem">A recipe card, cookbook page or screenshot. Up to ${IMG_MAX} images for multi-page recipes.</span><input id="imp-file" type="file" accept="image/*" multiple hidden></label>${IMP.files.length ? `<div class="thumbs">${IMP.files.map(f => `<img alt="" src="${esc(f.url)}">`).join("")}</div>` : ""}<div><button class="btn primary" data-act="imp-photo" ${IMP.busy || !IMP.files.length ? "disabled" : ""}>Read recipe</button></div>`;
+  if (IMP.mode === "photo") {
+    const n = IMP.files.length, full = n >= IMG_MAX;
+    const pick = `<input id="imp-file" type="file" accept="image/*" multiple hidden><input id="imp-cam" type="file" accept="image/*" capture="environment" hidden>`;
+    const buttons = full ? `<p class="muted" style="font-size:.88rem">That's the most pages one recipe can have (${IMG_MAX}).</p>`
+      : `<div class="photo-btns">${TOUCH ? `<label class="btn ${n ? "" : "primary"}" for="imp-cam">${n ? "Take next page" : "Take photo"}</label>` : ""}<label class="btn" for="imp-file">${n ? "Add more pages" : TOUCH ? "Choose from photos" : "Choose photos"}</label></div>`;
+    const intro = n ? `<p class="muted" style="font-size:.88rem">${n} page${n > 1 ? "s" : ""}, read in this order. ${full ? "" : "Add the next page, or read the recipe when you have them all."}</p>`
+      : `<label class="drop" id="drop" for="imp-file"><b>${TOUCH ? "Photograph the recipe" : "Choose or drop photos"}</b><span class="muted" style="font-size:.88rem">A recipe card, cookbook page or screenshot. For a recipe that runs over several pages, add one photo per page, up to ${IMG_MAX}.</span></label>`;
+    const thumbs = n ? `<div class="thumbs" id="drop">${IMP.files.map((f, i) => `<figure class="thumb"><img alt="Page ${i + 1}" src="${esc(f.url)}"><figcaption>Page ${i + 1}</figcaption><div class="thumb-acts">${i ? `<button class="btn sm" data-act="img-left" data-i="${i}" aria-label="Move page ${i + 1} earlier">←</button>` : ""}<button class="btn sm" data-act="img-del" data-i="${i}" aria-label="Remove page ${i + 1}">✕</button></div></figure>`).join("")}</div>` : "";
+    body = `${pick}${intro}${thumbs}${buttons}<div><button class="btn primary" data-act="imp-photo" ${IMP.busy || !n ? "disabled" : ""}>Read recipe${n > 1 ? ` (${n} pages)` : ""}</button></div>`;
+  }
   if (IMP.mode === "text") body = `<div class="field"><label class="label" for="imp-text">Recipe text</label><textarea id="imp-text" rows="10" class="inp" placeholder="Paste the whole recipe: title, ingredients, method…">${esc(IMP.text)}</textarea></div><div><button class="btn primary" data-act="imp-text" ${IMP.busy ? "disabled" : ""}>Read recipe</button></div>`;
   if (IMP.mode === "manual") body = `<p class="muted">Start from a blank recipe and fill in the ingredients, times and oven temperature yourself.</p><div><button class="btn primary" data-act="imp-manual">Start blank recipe</button></div>`;
   const status = IMP.busy ? `<div class="status"><div class="spin"></div><span>${esc(IMP.msg || "Claude is reading the recipe…")}</span><button class="btn ghost sm" data-act="imp-stop" style="margin-left:auto">Stop</button></div>` : IMP.msg ? `<div class="status ${IMP.err ? "err" : ""}">${esc(IMP.msg)}</div>` : "";
@@ -632,6 +642,7 @@ async function runExtract(payload, busyMsg) {
     if (res.status === 401) { S.signedIn = false; closeModal(); render(); return; }
     if (!res.ok) throw new Error(d.error || "Something went wrong reading the recipe. Try again.");
     IMP.busy = false; IMP.msg = ""; S.importCtl = null;
+    if (payload.kind === "images") { IMP.files.forEach(f => URL.revokeObjectURL(f.url)); IMP.files = []; }
     openModal({ type: "edit", isNew: true, draft: draftFrom(d.recipe, d.recipe.source || payload.source || "") });
   } catch (e) {
     S.importCtl = null; IMP.busy = false;
@@ -740,6 +751,8 @@ document.addEventListener("click", async e => {
   else if (a === "imp-link") importLink();
   else if (a === "imp-text") { IMP.text = $("#imp-text").value; if (IMP.text.trim().length < 40) { IMP.err = true; IMP.msg = "Paste the full recipe, including the ingredient list."; renderModal(); return; } runExtract({ kind: "text", text: IMP.text }); }
   else if (a === "imp-photo") importPhotos();
+  else if (a === "img-del") { const [f] = IMP.files.splice(Number(el.dataset.i), 1); if (f) URL.revokeObjectURL(f.url); IMP.msg = ""; renderModal(); }
+  else if (a === "img-left") { const i = Number(el.dataset.i); if (i > 0) { [IMP.files[i - 1], IMP.files[i]] = [IMP.files[i], IMP.files[i - 1]]; renderModal(); } }
   else if (a === "imp-stop") { S.importCtl?.abort(); }
   else if (a === "imp-manual") openModal({ type: "edit", isNew: false, draft: blankDraft() });
   else if (a === "edit") { const r = getR(id); if (r) openModal({ type: "edit", isNew: false, draft: draftFromRecipe(r) }); }
@@ -803,7 +816,7 @@ document.addEventListener("change", e => {
   else if (el.id === "nb-copy" && S.bakeForm) S.bakeForm.copyFrom = el.value;
   else if (c === "plan") { const k = el.dataset.k; S.plan[k] = el.type === "checkbox" ? el.checked : (["ovens", "sheetsPerOven"].includes(k) ? Number(el.value) : el.value); savePlan(); }
   else if (c === "have") { S.plan.have = { ...(S.plan.have || {}) }; if (el.checked) S.plan.have[el.dataset.key] = true; else delete S.plan.have[el.dataset.key]; savePlan(); }
-  else if (el.id === "imp-file") addFiles(el.files);
+  else if (el.id === "imp-file" || el.id === "imp-cam") { addFiles(el.files); el.value = ""; }
   else if (el.dataset.f === "freezable" && S.modal?.draft) S.modal.draft.freezable = el.checked;
   else if (el.dataset.ing != null && el.tagName === "SELECT") S.modal.draft.ingredients[Number(el.dataset.ing)][el.dataset.k] = el.value;
 });
@@ -814,11 +827,12 @@ document.addEventListener("input", e => {
   if (el.dataset.f && el.type !== "checkbox") d[el.dataset.f] = el.value;
   if (el.dataset.ing != null) d.ingredients[Number(el.dataset.ing)][el.dataset.k] = el.value;
 });
+/* Photos add up as pages, so a phone can take one picture per page. */
 function addFiles(list) {
-  const imgs = [...list].filter(f => /^image\//.test(f.type));
-  IMP.files.forEach(f => URL.revokeObjectURL(f.url));
-  IMP.files = imgs.slice(0, IMG_MAX).map(file => ({ file, url: URL.createObjectURL(file) }));
-  IMP.msg = imgs.length > IMP.files.length ? `Only the first ${IMP.files.length} photos will be read.` : ""; IMP.err = false; renderModal();
+  const imgs = [...list].filter(f => /^image\//.test(f.type) || /\.(heic|heif)$/i.test(f.name));
+  const room = IMG_MAX - IMP.files.length;
+  IMP.files.push(...imgs.slice(0, room).map(file => ({ file, url: URL.createObjectURL(file) })));
+  IMP.msg = imgs.length > room ? `A recipe can have up to ${IMG_MAX} pages, so ${imgs.length - room} photo${imgs.length - room > 1 ? "s were" : " was"} left out.` : ""; IMP.err = false; renderModal();
 }
 document.addEventListener("dragover", e => { const d = e.target.closest?.("#drop"); if (d) { e.preventDefault(); d.classList.add("over"); } });
 document.addEventListener("dragleave", e => { e.target.closest?.("#drop")?.classList.remove("over"); });

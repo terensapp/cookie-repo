@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { betaZodOutputFormat } from "@anthropic-ai/sdk/helpers/beta/zod";
-import { z } from "zod";
+import { z } from "zod/v4"; // the SDK's output-format helper reads Zod 4 schemas
 
 export const UNITS = ["", "tsp", "tbsp", "cup", "g", "kg", "oz", "lb", "ml", "l", "stick", "each", "pinch"];
 export const CATS = ["Baking staples", "Dairy & eggs", "Sugar & sweeteners", "Mix-ins", "Spices & extracts", "Produce", "Other"];
