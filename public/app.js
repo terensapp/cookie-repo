@@ -257,6 +257,50 @@ function schedule() {
 /* ---------- shopping ---------- */
 const VOL = { tsp: 1, tbsp: 3, cup: 48, ml: 0.2029, l: 202.9 }, WT = { g: 1, kg: 1000, oz: 28.35, lb: 453.6 };
 const keyOf = item => String(item || "").toLowerCase().replace(/[^a-z0-9% -]/g, " ").replace(/\s+/g, " ").trim().split(" ").map((w, i, a) => (i === a.length - 1 && w.length > 3 && /[^s]s$/.test(w)) ? w.slice(0, -1) : w).join(" ");
+/* ---------- possible duplicates ---------- */
+const NAME_FILLER = new Set(["cookie", "cookies", "the", "a", "an", "best", "easy", "my", "our", "recipe", "classic", "homemade", "perfect", "ultimate", "favorite", "favourite", "famous", "and", "with", "of", "s"]);
+const ING_FILLER = new Set(["large", "small", "unsalted", "salted", "granulated", "light", "dark", "pure", "kosher", "fine", "packed", "all", "purpose", "all-purpose", "fresh", "softened", "melted", "cold", "room", "temperature", "ground", "whole", "plain", "regular", "extra", "sifted", "chopped"]);
+const nameWords = n => new Set(fold(n).replace(/[^a-z0-9 ]/g, " ").split(/\s+/).filter(w => w && !NAME_FILLER.has(w)).map(w => w.length > 3 ? w.replace(/(e?s)$/, "") : w));
+const ingCore = item => keyOf(item).split(" ").filter(w => w && !ING_FILLER.has(w)).join(" ");
+const ingSet = list => new Set((list || []).map(g => ingCore(g.item)).filter(Boolean));
+const jaccard = (A, B) => { if (!A.size || !B.size) return 0; let n = 0; for (const x of A) if (B.has(x)) n++; return n / (A.size + B.size - n); };
+/* How alike two recipes are, and a plain reason when they're alike enough to flag. */
+function compareRecipes(a, b) {
+  const nA = nameWords(a.name), nB = nameWords(b.name), iA = ingSet(a.ingredients), iB = ingSet(b.ingredients);
+  const name = nA.size && nB.size ? jaccard(nA, nB) : (fold(a.name).trim() === fold(b.name).trim() ? 1 : 0);
+  const ing = jaccard(iA, iB), shared = [...iA].filter(x => iB.has(x)).length;
+  const enough = iA.size >= 4 && iB.size >= 4;
+  let why = "";
+  const sameName = name >= 0.99 ? (fold(a.name).trim() === fold(b.name).trim() ? "Same name" : "Nearly the same name") : "";
+  if (sameName && (ing >= 0.4 || !enough)) why = sameName;
+  else if (enough && ing >= 0.75) why = `${shared} of ${Math.max(iA.size, iB.size)} ingredients match`;
+  else if (name >= 0.5 && enough && ing >= 0.5) why = `Similar name, ${shared} of ${Math.max(iA.size, iB.size)} ingredients match`;
+  else if (sameName) why = `${sameName}, different ingredients`;
+  return { why, score: name + ing, onlyA: [...iA].filter(x => !iB.has(x)), onlyB: [...iB].filter(x => !iA.has(x)) };
+}
+/* recipe id -> its closest likely duplicate. Pairs marked "not a duplicate" are skipped. */
+let dupeCache = { key: "", map: new Map() };
+function dupeMap() {
+  const key = S.recipes.map(r => `${r.id}:${r.name}:${(r.ingredients || []).length}:${(r.notDupes || []).length}`).join("|");
+  if (key === dupeCache.key) return dupeCache.map;
+  const map = new Map(), rs = S.recipes;
+  for (let i = 0; i < rs.length; i++) for (let j = i + 1; j < rs.length; j++) {
+    const a = rs[i], b = rs[j];
+    if ((a.notDupes || []).includes(b.id) || (b.notDupes || []).includes(a.id)) continue;
+    const c = compareRecipes(a, b); if (!c.why) continue;
+    if (!map.has(a.id) || map.get(a.id).score < c.score) map.set(a.id, { other: b.id, why: c.why, score: c.score, onlyHere: c.onlyA, onlyThere: c.onlyB });
+    if (!map.has(b.id) || map.get(b.id).score < c.score) map.set(b.id, { other: a.id, why: c.why, score: c.score, onlyHere: c.onlyB, onlyThere: c.onlyA });
+  }
+  dupeCache = { key, map }; return map;
+}
+/* For a recipe being imported: the closest one already in the box. */
+function closestExisting(draft) {
+  const probe = { name: draft.name, ingredients: draft.ingredients };
+  let best = null;
+  for (const r of S.recipes) { if (r.id === draft.id) continue; const c = compareRecipes(probe, r); if (c.why && (!best || c.score > best.score)) best = { r, ...c }; }
+  return best;
+}
+const diffText = (here, there, otherName) => [here.length ? `Only this one: ${here.slice(0, 6).join(", ")}${here.length > 6 ? "…" : ""}` : "", there.length ? `Only ${otherName}: ${there.slice(0, 6).join(", ")}${there.length > 6 ? "…" : ""}` : ""].filter(Boolean).join(" · ") || "Same ingredients";
 const DENS = [[/powdered|confectioner|icing sugar/, 120], [/brown sugar/, 213], [/sugar/, 200], [/bread flour/, 130], [/flour/, 125], [/cocoa/, 85], [/oat/, 90], [/chip|chocolate/, 170]];
 function fmtVol(tsp) {
   if (tsp >= 12) { const c = tsp / 48; return `${frac(c)} ${c > 1.06 ? "cups" : "cup"}`; }
@@ -425,7 +469,9 @@ function viewRecipes() {
   const owners = [...new Set(S.recipes.map(r => r.owner).filter(Boolean))];
   const bar = `<div class="search-bar"><input id="recipe-q" type="search" class="inp" placeholder="Search names, ingredients, notes…" aria-label="Search recipes" value="${esc(S.q || "")}" autocomplete="off">
     ${owners.length > 1 ? `<label class="who">Owner ${personSelect("recipe-owner", S.ownerFilter || "", `data-change="owner-filter"`, "Filter by owner", "Anyone")}</label>` : ""}</div>`;
-  return head + bar + `<div id="recipe-results">${recipeResults()}</div>`;
+  const nDupes = dupeMap().size;
+  const dupeBanner = nDupes ? `<div class="banner dupe-banner"><span>${nDupes} recipes look like possible duplicates.</span><button class="btn sm" data-act="dupe-filter">${S.dupeFilter ? "Show all recipes" : "Show them"}</button></div>` : "";
+  return head + dupeBanner + bar + `<div id="recipe-results">${recipeResults()}</div>`;
 }
 /* Every word has to appear somewhere in the recipe: its name, ingredients, notes, owner, source, steps or tips. */
 const fold = t => String(t || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
@@ -451,13 +497,14 @@ function matchRecipe(r, words) {
 }
 function recipeResults() {
   const words = fold(S.q).split(/\s+/).filter(Boolean);
-  const hits = S.recipes.filter(r => !S.ownerFilter || r.owner === S.ownerFilter).map(r => ({ r, m: matchRecipe(r, words) })).filter(x => x.m.ok);
+  const dupes = dupeMap();
+  const hits = S.recipes.filter(r => (!S.ownerFilter || r.owner === S.ownerFilter) && (!S.dupeFilter || dupes.has(r.id))).map(r => ({ r, m: matchRecipe(r, words) })).filter(x => x.m.ok);
   if (!hits.length) return `<div class="empty"><h2>No recipes match</h2><p class="muted">${S.q ? `Nothing has “${esc(S.q)}”${S.ownerFilter ? ` for ${esc(personName(S.ownerFilter))}` : ""}. Try fewer words, or an ingredient.` : "No recipes for that owner yet."}</p><button class="btn" data-act="search-clear">Clear search</button></div>`;
-  const count = words.length || S.ownerFilter ? `<p class="muted" style="font-size:.88rem;margin-bottom:10px">${hits.length} of ${S.recipes.length} recipes</p>` : "";
+  const count = words.length || S.ownerFilter || S.dupeFilter ? `<p class="muted" style="font-size:.88rem;margin-bottom:10px">${hits.length} of ${S.recipes.length} recipes</p>` : "";
   const cards = hits.map(({ r, m }) => {
     const on = !!S.plan.selections?.[r.id], nN = (r.notes || []).length;
     return `<article class="card ${on ? "on" : ""}" data-act="open" data-id="${esc(r.id)}" tabindex="0" role="button" aria-label="Open ${esc(r.name)}">
-      <div class="card-top"><h3>${esc(r.name || "Untitled")}</h3>${r.example ? `<span class="chip ex">Example</span>` : ""}</div>
+      <div class="card-top"><h3>${esc(r.name || "Untitled")}</h3>${r.example ? `<span class="chip ex">Example</span>` : ""}</div>${dupes.has(r.id) ? `<span class="chip dupe" title="${esc(dupes.get(r.id).why)} with ${esc(getR(dupes.get(r.id).other)?.name || "")}">Possible duplicate</span>` : ""}
       <div class="chips">${recipeChips(r)}</div>${m.why ? `<p class="why">${esc(m.why)}</p>` : ""}
       <div class="card-foot"><span class="muted">${r.owner ? `${esc(personName(r.owner))} · ` : ""}${nN ?`${nN} note${nN > 1 ? "s" : ""}` : (r.ingredients || []).length + " ingredients"}${on ? ` · ${scaleLabel(scaleOf(r.id))}` : ""}</span>
       <button class="toggle" data-act="toggle" data-id="${esc(r.id)}" aria-pressed="${on}">${on ? "✓ Baking" : "+ Bake"}</button></div>
@@ -714,6 +761,7 @@ function viewDetail(r) {
   return `<div class="sheet" role="dialog" aria-modal="true" aria-labelledby="dlg-title">
     <div class="sheet-head"><div><h2 id="dlg-title">${esc(r.name)}</h2><div class="chips" style="margin-top:8px">${r.ovenTempF ? `<span class="chip temp">${esc(r.ovenTempF)}°F</span>` : ""}${times}${r.example ? `<span class="chip ex">Example recipe</span>` : ""}${r.owner ? `<span class="chip">Owner: ${esc(personName(r.owner))}</span>` : ""}</div>${src || from ? `<p style="margin-top:8px;font-size:.85rem">${src ? `<a href="${esc(src)}" target="_blank" rel="noopener noreferrer">Original recipe on ${esc(hostOf(src))} ↗</a>` : ""}${src && from ? " · " : ""}${from ? `<span class="muted">From ${esc(from)}</span>` : ""}</p>` : ""}</div><button class="x" data-act="close" aria-label="Close">×</button></div>
     <div class="sheet-body">
+      ${(() => { const d = dupeMap().get(r.id), o = d && getR(d.other); return o ? `<div class="banner dupe-banner"><span><b>Possible duplicate of ${esc(o.name)}</b> · ${esc(d.why)}.<br><span class="muted" style="font-size:.85rem">${esc(diffText(d.onlyHere, d.onlyThere, o.name))}</span></span><span style="display:flex;gap:6px;flex-wrap:wrap"><button class="btn sm" data-act="open" data-id="${esc(o.id)}">Open ${esc(o.name)}</button><button class="btn sm ghost" data-act="not-dupe" data-id="${esc(r.id)}" data-other="${esc(o.id)}">Not a duplicate</button></span></div>` : ""; })()}
       <div class="scale-box"><span class="label">Batch</span>${scaleControl(r)}<span class="out">${r.yieldCount ? `${Math.round(num(r.yieldCount) * s)} cookies` : ""}</span><button class="toggle" data-act="toggle" data-id="${esc(r.id)}" aria-pressed="${on}" style="margin-left:auto">${on ? "✓ On the bake plan" : "+ Add to bake plan"}</button></div>
       <div class="two"><div><span class="label">Ingredients${s !== 1 ? ` · scaled ${scaleLabel(s)}` : ""}</span><ul class="ing" style="margin-top:6px">${ings || `<li><span></span><span class="muted">No ingredients yet</span></li>`}</ul></div>
       <div style="display:flex;flex-direction:column;gap:12px"><div><span class="label">Notes for next time</span><div class="notes" style="margin-top:6px">${notes || `<p class="muted" style="font-size:.9rem">Nothing yet. Jot down what you'd change: bake a minute less, double the chips, chill overnight.</p>`}</div></div>
@@ -816,6 +864,7 @@ function viewEditor(d, isNew) {
   return `<div class="sheet" role="dialog" aria-modal="true" aria-labelledby="ed-title">
     <div class="sheet-head"><div><h2 id="ed-title">${isNew ? "Check the recipe" : "Edit recipe"}</h2>${isNew ? `<p class="muted" style="margin-top:4px">Claude filled this in. Fix anything it misread, then save.</p>` : ""}</div><button class="x" data-act="close" aria-label="Close">×</button></div>
     <div class="sheet-body">
+      ${(() => { if (getR(d.id)) return ""; const m = closestExisting(d); return m ? `<div class="banner dupe-banner"><span><b>You may already have this: ${esc(m.r.name)}</b> · ${esc(m.why)}.<br><span class="muted" style="font-size:.85rem">${esc(diffText(m.onlyA, m.onlyB, m.r.name))}</span></span><span style="display:flex;gap:6px;flex-wrap:wrap"><button class="btn sm" data-act="open" data-id="${esc(m.r.id)}">Discard this and open ${esc(m.r.name)}</button></span><span class="muted" style="font-size:.85rem">Or save it anyway, e.g. if it's a different version.</span></div>` : ""; })()}
       ${isNew && d.photos?.length && safeUrl(d.link) ? `<div class="banner relink"><span>The photo shows a web address: <b>${esc(hostOf(d.link))}</b>. If the photo is hard to read, Claude can read the recipe from the website instead. Your photos stay with the recipe either way.</span>
         ${S.modal.relink?.busy ? `<span class="status"><span class="spin"></span>Reading the website…</span>` : `<button class="btn sm" data-act="relink">Read from the website instead</button>`}${S.modal.relink?.msg ? `<span class="status err">${esc(S.modal.relink.msg)}</span>` : ""}</div>` : ""}
       <div class="form-grid">
@@ -836,6 +885,7 @@ function viewEditor(d, isNew) {
         ${rows}<div><button class="btn sm" data-act="ing-add">+ Add ingredient</button></div></div>
       <label class="field"><span class="label">Method, one step per line</span><textarea id="ed-steps" data-f="stepsText" rows="7">${esc(d.stepsText)}</textarea></label>
       <p class="status err" id="ed-err" hidden></p>
+      ${S.modal.dupeAsk ? `<div class="confirm" id="dupe-ask"><span><b>This looks a lot like ${esc(S.modal.dupeAsk.name)}</b> (${esc(S.modal.dupeAsk.why.toLowerCase())}). Add it anyway?</span><button class="btn primary sm" data-act="dupe-add">Add anyway</button><button class="btn sm" data-act="open" data-id="${esc(S.modal.dupeAsk.id)}">Open ${esc(S.modal.dupeAsk.name)} instead</button></div>` : ""}
     </div>
     <div class="sheet-foot"><button class="btn ghost" data-act="close">Cancel</button><button class="btn primary" data-act="ed-save">Save recipe</button></div></div>`;
 }
@@ -850,6 +900,8 @@ async function saveDraft(btn) {
     steps: d.stepsText.split("\n").map(s => s.replace(/^\s*\d+[.)]\s*/, "").trim()).filter(Boolean),
     owner: d.owner || "", notes: old ? clone(old.notes || []) : d.notes || [], example: !!(old && old.example && d.example), createdAt: old?.createdAt || new Date().toISOString(),
   };
+  // Adding something that looks like a recipe already in the box: ask once before saving.
+  if (!old && !S.modal.dupeOk) { const m = closestExisting(d); if (m) { S.modal.dupeAsk = { id: m.r.id, name: m.r.name, why: m.why }; renderModal(); $("#dupe-ask")?.scrollIntoView({ block: "nearest" }); return; } }
   if (rec.link && !safeUrl(rec.link)) { err.hidden = false; err.textContent = "The link should start with https://"; $("#ed-link")?.focus(); return; }
   btn.disabled = true;
   const ok = await saveRecipe(rec);
@@ -965,7 +1017,15 @@ document.addEventListener("click", async e => {
   }
   else if (a === "clear-have") { S.plan.have = {}; savePlan(); }
   else if (a === "reload") loadState();
-  else if (a === "search-clear") { S.q = ""; S.ownerFilter = ""; render(); $("#recipe-q")?.focus(); }
+  else if (a === "dupe-add") { S.modal.dupeOk = true; S.modal.dupeAsk = null; saveDraft($('[data-act="ed-save"]')); }
+  else if (a === "dupe-filter") { S.dupeFilter = !S.dupeFilter; render(); }
+  else if (a === "not-dupe") {
+    const a1 = getR(id), b1 = getR(el.dataset.other); if (!a1 || !b1) return;
+    const r1 = clone(a1), r2 = clone(b1);
+    r1.notDupes = [...new Set([...(r1.notDupes || []), r2.id])]; r2.notDupes = [...new Set([...(r2.notDupes || []), r1.id])];
+    el.disabled = true; if (await saveRecipe(r1) && await saveRecipe(r2)) toast("Got it, not a duplicate"); renderModal();
+  }
+  else if (a === "search-clear") { S.q = ""; S.ownerFilter = ""; S.dupeFilter = false; render(); $("#recipe-q")?.focus(); }
   else if (a === "bakes") { S.bakeForm = null; S.confirmBake = null; openModal({ type: "bakes" }); }
   else if (a === "bake-new" || a === "bake-copy") { S.bakeForm = newBakeForm(a === "bake-copy" ? id : ""); S.confirmBake = null; if (S.modal?.type === "bakes") renderModal(); else openModal({ type: "bakes" }); $("#nb-name")?.focus(); }
   else if (a === "prebake-new") { S.bakeForm = newBakeForm("", id); S.confirmBake = null; openModal({ type: "bakes" }); $("#nb-name")?.focus(); }
