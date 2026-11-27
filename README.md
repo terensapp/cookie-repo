@@ -29,6 +29,7 @@ Recipe links are fetched by the server (private network addresses are refused) a
 | `SESSION_SECRET` | Long random string used to sign sessions and codes |
 | `BOOTSTRAP_EMAILS` | Comma-separated addresses allowed in on first start, when the list is empty |
 | `CANONICAL_HOST` | Optional, e.g. `cookierepo.com`: every other hostname (www, the fly.dev address) redirects here |
+| `BACKUP_TOKEN` | Optional, 64 hex characters. Turns on `/api/backup/*`, used by the nightly backup in the private `recipe-backups` repo |
 | `CLAUDE_MODEL` | Optional; defaults to `claude-opus-5-5` |
 | `DATABASE_PATH` | SQLite file; `/data/cookie-tin.db` on Fly |
 
@@ -69,3 +70,7 @@ fly ips list   # A and AAAA records for the apex domain
 ```
 
 Once the certificates are issued, `fly secrets set CANONICAL_HOST=cookierepo.com` sends every other address to the main one.
+
+## Backups
+
+A GitHub Actions job in the private `terensapp/recipe-backups` repo runs nightly. It calls `/api/backup/manifest` and `/api/backup/image/:id` with `BACKUP_TOKEN`, and commits every recipe, bake, pantry, person and photo as plain files. That repo's README covers restoring, including onto a brand-new Fly app; `/api/backup/restore` merges a backup in without deleting anything. The code is in [server/backup.js](server/backup.js).

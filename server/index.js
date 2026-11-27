@@ -9,6 +9,7 @@ import { sendCode } from "./email.js";
 import { extractRecipe, ExtractError } from "./extract.js";
 import { fetchRecipePage, fetchRecipeImage } from "./fetchPage.js";
 import { EXAMPLES } from "./examples.js";
+import { backupRoutes } from "./backup.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 8080);
@@ -64,6 +65,9 @@ function limit(key, max, windowMs) {
 setInterval(() => { const now = Date.now(); for (const [k, v] of hits) if (v.every((t) => now - t > 3600_000)) hits.delete(k); }, 600_000).unref();
 
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+
+/* ---------- nightly backup (token-protected, see server/backup.js) ---------- */
+backupRoutes(app);
 
 /* ---------- sign in ---------- */
 app.post("/api/auth/request", wrap(async (req, res) => {
