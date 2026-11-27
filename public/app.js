@@ -60,6 +60,7 @@ const HELP = {
   batch: "Scale the recipe up or down. Amounts, cookie count and shopping all follow. On the bake plan, this is the batch you're making.",
   origin: "Where the recipe came from. Links from imports are saved automatically; add or change one any time.",
   notes: "Reminders for next time: what to change, how long it really took. Each note records who wrote it and when.",
+  cookiePhotos: "Pictures of the finished cookies. The main one (★) shows on the recipe card in the recipe box, at the top of the recipe, and on the printed recipe.",
   photos: "The original pictures of the recipe card or page, kept at full size. Tap one to open it; ↓ downloads it.",
   importLink: "Paste the address of a recipe page. Some sites block automated readers; if one does, take a screenshot and use Photo.",
   owner: "Whose recipe this is. Just for reference: it's shown on the card and you can filter by it.",
@@ -684,7 +685,8 @@ function recipeResults() {
   const count = words.length || S.ownerFilter || S.dupeFilter ? `<p class="muted" style="font-size:.88rem;margin-bottom:10px">${hits.length} of ${S.recipes.length} recipes</p>` : "";
   const cards = hits.map(({ r, m }) => {
     const on = !!S.plan.selections?.[r.id], nN = (r.notes || []).length;
-    return `<article class="card ${on ? "on" : ""}" data-act="open" data-id="${esc(r.id)}" tabindex="0" role="button" aria-label="Open ${esc(r.name)}">
+    const pic = mainCookiePhoto(r);
+    return `<article class="card ${on ? "on" : ""} ${pic ? "has-pic" : ""}" data-act="open" data-id="${esc(r.id)}" tabindex="0" role="button" aria-label="Open ${esc(r.name)}">${pic ? `<img class="card-pic" alt="" loading="lazy" src="${esc(imgSrc(pic))}">` : ""}
       <div class="card-top"><h3>${esc(r.name || "Untitled")}</h3>${r.example ? `<span class="chip ex">Example</span>` : ""}</div>${dupes.has(r.id) ? `<span class="chip dupe" title="${esc(dupes.get(r.id).why)} with ${esc(getR(dupes.get(r.id).other)?.name || "")}">Possible duplicate</span>` : ""}
       <div class="chips">${recipeChips(r)}</div>${m.why ? `<p class="why">${esc(m.why)}</p>` : ""}
       <div class="card-foot"><span class="muted">${r.owner ? `${esc(personName(r.owner))} · ` : ""}${nN ?`${nN} note${nN > 1 ? "s" : ""}` : (r.ingredients || []).length + " ingredients"}${on ? ` · ${scaleLabel(scaleOf(r.id))}` : ""}</span>
@@ -975,17 +977,23 @@ function viewOrigin(r) {
     : `<span class="muted">No link saved.</span> <button class="btn sm" data-act="link-edit" data-id="${esc(r.id)}">+ Add link</button>`;
   return `<div class="origin"><span class="label">Original recipe ${help("origin", "Original recipe")}</span><div class="origin-line">${link}</div>${from ? `<div class="muted" style="font-size:.88rem">From ${esc(from)}</div>` : ""}</div>`;
 }
-function viewPhotos(r) {
-  const imgs = r.images || [], up = S.uploading?.id === r.id ? S.uploading : null;
-  const items = imgs.map((im, i) => `<figure class="thumb"><a href="/api/images/${esc(im.id)}" target="_blank" rel="noopener" title="Open full size"><img alt="Original photo ${i + 1}" loading="lazy" src="/api/images/${esc(im.id)}${im.thumb ? "?size=thumb" : ""}"></a>
-    <figcaption>${im.type === "image/heic" && !im.thumb ? "HEIC · " : ""}${fmtSize(im.size)}</figcaption>
+/* Photos come in two kinds: the cookie itself (shown on the card and printout) and the original recipe pages. */
+const photosOf = (r, kind) => (r.images || []).filter(im => (im.kind || "original") === kind);
+const mainCookiePhoto = r => photosOf(r, "cookie")[0] || null;
+const imgSrc = im => `/api/images/${encodeURIComponent(im.id)}${im.thumb ? "?size=thumb" : ""}`;
+function viewPhotos(r) { return viewPhotoSet(r, "cookie") + viewPhotoSet(r, "original"); }
+function viewPhotoSet(r, kind) {
+  const imgs = photosOf(r, kind), up = S.uploading?.id === r.id && S.uploading.kind === kind ? S.uploading : null, cookie = kind === "cookie";
+  const items = imgs.map((im, i) => `<figure class="thumb"><a href="/api/images/${esc(im.id)}" target="_blank" rel="noopener" title="Open full size"><img alt="${cookie ? "Cookie" : "Original"} photo ${i + 1}" loading="lazy" src="${esc(imgSrc(im))}"></a>
+    <figcaption>${cookie ? (i === 0 ? "★ Main photo" : `<button class="linkish" data-act="img-main" data-id="${esc(r.id)}" data-img="${esc(im.id)}">Make main</button>`) : `${im.type === "image/heic" && !im.thumb ? "HEIC · " : ""}${fmtSize(im.size)}`}</figcaption>
     <div class="thumb-acts"><a class="btn sm" href="/api/images/${esc(im.id)}?download=1" aria-label="Download photo ${i + 1}">↓</a><button class="btn sm" data-act="img-rm" data-id="${esc(r.id)}" data-img="${esc(im.id)}" aria-label="Remove photo ${i + 1}">✕</button></div></figure>`).join("");
   const confirm = S.confirmImg && imgs.some(i => i.id === S.confirmImg) ? `<div class="confirm"><span>Remove this photo for good?</span><button class="btn danger solid sm" data-act="img-rm-yes" data-id="${esc(r.id)}">Remove</button><button class="btn sm" data-act="img-rm-no">Keep it</button></div>` : "";
-  return `<div><span class="label">Original photos ${help("photos", "Original photos")}</span>
-    ${imgs.length ? `<div class="thumbs" style="margin-top:8px">${items}</div>` : `<p class="muted" style="font-size:.9rem;margin-top:4px">No photos yet. Keep a picture of the recipe card or page here.</p>`}
+  const inputId = `add-${kind}-${r.id}`;
+  return `<div><span class="label">${cookie ? "Cookie photos" : "Original photos"} ${help(cookie ? "cookiePhotos" : "photos", cookie ? "Cookie photos" : "Original photos")}</span>
+    ${imgs.length ? `<div class="thumbs" style="margin-top:8px">${items}</div>` : `<p class="muted" style="font-size:.9rem;margin-top:4px">${cookie ? "No cookie photos yet. Add a picture of how they turned out; the main one goes on the recipe card." : "No photos yet. Keep a picture of the recipe card or page here."}</p>`}
     ${confirm}
     ${up ? `<div class="status" style="margin-top:8px"><div class="spin"></div><span>Saving photo ${Math.min(up.done + 1, up.total)} of ${up.total}…</span></div>`
-      : `<div style="margin-top:8px"><label class="btn sm" for="add-photo-${esc(r.id)}" style="cursor:pointer">+ Add photos</label><input id="add-photo-${esc(r.id)}" data-addphoto="${esc(r.id)}" type="file" accept="image/*" multiple hidden></div>`}</div>`;
+      : `<div style="margin-top:8px"><label class="btn sm" for="${esc(inputId)}" style="cursor:pointer">+ Add ${cookie ? "cookie " : ""}photos</label><input id="${esc(inputId)}" data-addphoto="${esc(r.id)}" data-kind="${kind}" type="file" accept="image/*" multiple hidden></div>`}</div>`;
 }
 const fmtSize = b => b >= 1048576 ? `${(b / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1024))} KB`;
 function viewDetail(r) {
@@ -1003,6 +1011,7 @@ function viewDetail(r) {
     <div class="sheet-head"><div><h2 id="dlg-title">${esc(r.name)}</h2><div class="chips" style="margin-top:8px">${r.ovenTempF ? `<span class="chip temp">${esc(r.ovenTempF)}°F</span>` : ""}${times}${r.example ? `<span class="chip ex">Example recipe</span>` : ""}${r.owner ? `<span class="chip">Owner: ${esc(personName(r.owner))}</span>` : ""}</div></div><button class="x" data-act="close" aria-label="Close">×</button></div>
     <div class="sheet-body">
       ${(() => { const d = dupeMap().get(r.id), o = d && getR(d.other); return o ? `<div class="banner dupe-banner"><span><b>Possible duplicate of ${esc(o.name)}</b> · ${esc(d.why)}.<br><span class="muted" style="font-size:.85rem">${esc(diffText(d.onlyHere, d.onlyThere, o.name))}</span></span><span style="display:flex;gap:6px;flex-wrap:wrap"><button class="btn sm" data-act="open" data-id="${esc(o.id)}">Open ${esc(o.name)}</button><button class="btn sm ghost" data-act="not-dupe" data-id="${esc(r.id)}" data-other="${esc(o.id)}">Not a duplicate</button></span></div>` : ""; })()}
+      ${mainCookiePhoto(r) ? `<a class="hero" href="/api/images/${esc(mainCookiePhoto(r).id)}" target="_blank" rel="noopener"><img alt="${esc(r.name)}" src="${esc(imgSrc(mainCookiePhoto(r)))}"></a>` : ""}
       ${viewOrigin(r)}
       <div class="scale-box"><span class="label">Batch ${help("batch", "Batch")}</span>${scaleControl(r)}<span class="out">${r.yieldCount ? `${Math.round(num(r.yieldCount) * s)} cookies` : ""}</span><button class="toggle" data-act="toggle" data-id="${esc(r.id)}" aria-pressed="${on}" style="margin-left:auto">${on ? "✓ On the bake plan" : "+ Add to bake plan"}</button></div>
       <div class="two"><div><span class="label">Ingredients${s !== 1 ? ` · scaled ${scaleLabel(s)}` : ""}</span><ul class="ing" style="margin-top:6px">${ings || `<li><span></span><span class="muted">No ingredients yet</span></li>`}</ul></div>
@@ -1052,7 +1061,11 @@ async function runExtract(payload, busyMsg) {
     if (!res.ok) throw new Error(d.error || "Something went wrong reading the recipe. Try again.");
     IMP.busy = false; IMP.msg = ""; S.importCtl = null;
     const draft = draftFrom(d.recipe, d.recipe.source || "");
-    if (payload.kind === "images") { draft.photos = IMP.files; IMP.files = []; } // the original photos are saved with the recipe
+    if (payload.kind === "images") {
+      draft.photos = IMP.files; IMP.files = []; // the original photos are saved with the recipe
+      const cp = d.recipe.cookiePhoto, page = cp?.found && draft.photos[Math.round(cp.image) - 1];
+      if (page) { const blob = await cropPhoto(page.file, cp).catch(() => null); if (blob) { draft.cookieCrop = { blob, url: URL.createObjectURL(blob) }; draft.useCrop = true; } }
+    }
     openModal({ type: "edit", isNew: true, draft });
   } catch (e) {
     S.importCtl = null; IMP.busy = false;
@@ -1121,6 +1134,7 @@ function viewEditor(d, isNew) {
         ${f("decorating", "Decorating", "text", "full", 'placeholder="Royal icing once fully cool"')}
         ${f("link", "Link to the original recipe", "url", "full", 'placeholder="https://…" inputmode="url"')}
         ${f("source", "Book or other source", "text", "full", 'placeholder="Grandma\'s recipe card, or a cookbook and page"')}
+        ${d.cookieCrop ? `<div class="full crop-offer"><span class="label">Cookie photo found on the page</span><div class="crop-row"><img alt="Cookie photo cropped from the recipe" src="${esc(d.cookieCrop.url)}"><label class="check"><input type="checkbox" id="ed-usecrop" ${d.useCrop ? "checked" : ""}>Save this as the cookie photo</label></div><p class="muted" style="font-size:.85rem">Claude spotted a picture of the cookies and cropped it out. Untick it if the crop looks wrong; you can add a cookie photo later.</p></div>` : ""}
         ${d.photos?.length ? `<div class="full"><span class="label">Original photo${d.photos.length > 1 ? "s" : ""}</span><div class="thumbs" style="margin-top:6px">${d.photos.map((f, i) => `<figure class="thumb"><img alt="Page ${i + 1}" src="${esc(f.url)}"><figcaption>Page ${i + 1}</figcaption></figure>`).join("")}</div><p class="muted" style="font-size:.85rem;margin-top:6px">Saved with the recipe at full size.</p></div>` : ""}
       </div>
       <div class="ing-edit"><span class="label">Ingredients</span>
@@ -1155,8 +1169,28 @@ async function saveDraft(btn) {
   openModal({ type: "detail", id: rec.id });
   if (photos.length) await uploadPhotos(rec.id, photos.map(p => p.file));
   photos.forEach(p => URL.revokeObjectURL(p.url));
+  if (d.cookieCrop) { if (d.useCrop) await uploadPhotos(rec.id, [new File([d.cookieCrop.blob], "cookie.jpg", { type: "image/jpeg" })], "cookie"); URL.revokeObjectURL(d.cookieCrop.url); }
 }
 
+/* Cut the cookie photo Claude found out of the full-size original page, with a little margin since its box is approximate. */
+function cropPhoto(file, box) {
+  const c01 = v => Math.min(1, Math.max(0, Number(v) || 0));
+  let { left, top, right, bottom } = { left: c01(box.left), top: c01(box.top), right: c01(box.right), bottom: c01(box.bottom) };
+  if (right - left < 0.08 || bottom - top < 0.08 || (right - left) * (bottom - top) > 0.95) return Promise.resolve(null); // too small, or just the whole page
+  const m = 0.02; left = c01(left - m); top = c01(top - m); right = c01(right + m); bottom = c01(bottom + m);
+  return new Promise((resolve, reject) => {
+    const img = new Image(), url = URL.createObjectURL(file);
+    img.onload = () => {
+      const W = img.naturalWidth, H = img.naturalHeight, sx = left * W, sy = top * H, sw = (right - left) * W, sh = (bottom - top) * H;
+      const k = Math.min(1, 2000 / Math.max(sw, sh)), c = document.createElement("canvas");
+      c.width = Math.round(sw * k); c.height = Math.round(sh * k);
+      c.getContext("2d").drawImage(img, sx, sy, sw, sh, 0, 0, c.width, c.height); URL.revokeObjectURL(url);
+      c.toBlob(b => b ? resolve(b) : reject(new Error("crop failed")), "image/jpeg", 0.9);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("couldn't open the photo")); };
+    img.src = url;
+  });
+}
 /* ---------- original photos ---------- */
 function shrinkToBlob(file, max) {
   return new Promise(resolve => {
@@ -1171,17 +1205,17 @@ function shrinkToBlob(file, max) {
     img.src = url;
   });
 }
-async function uploadPhotos(recipeId, files) {
-  S.uploading = { id: recipeId, done: 0, total: files.length }; if (S.modal?.type === "detail") renderModal();
-  const start = (getR(recipeId)?.images || []).length;
+async function uploadPhotos(recipeId, files, kind = "original") {
+  S.uploading = { id: recipeId, kind, done: 0, total: files.length }; if (S.modal?.type === "detail") renderModal();
+  const start = photosOf(getR(recipeId) || {}, kind).length;
   let failed = 0;
   for (const [i, file] of files.entries()) {
     try {
-      const res = await fetch(`/api/recipes/${encodeURIComponent(recipeId)}/images?page=${start + i}`, { method: "POST", body: file, headers: { "Content-Type": "application/octet-stream" } });
+      const res = await fetch(`/api/recipes/${encodeURIComponent(recipeId)}/images?page=${start + i}&kind=${kind}`, { method: "POST", body: file, headers: { "Content-Type": "application/octet-stream" } });
       const d = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(d.error || "A photo couldn't be saved.");
       let images = d.images;
-      const thumb = await shrinkToBlob(file, 480);
+      const thumb = await shrinkToBlob(file, kind === "cookie" ? 1100 : 480); // cookie photos print, so their preview is bigger
       if (thumb) { const t = await fetch(`/api/images/${d.id}/thumb`, { method: "PUT", body: thumb, headers: { "Content-Type": "image/jpeg" } }); if (t.ok) images = (await t.json()).images; }
       const r = getR(recipeId); if (r) r.images = images;
     } catch (e) { failed++; toast(e.message === "Failed to fetch" ? "Lost the connection while saving a photo." : e.message); }
@@ -1199,8 +1233,10 @@ function printRecipe(r) {
   const ings = (r.ingredients || []).map(g => { const q = g.qty == null || g.qty === "" ? null : num(g.qty) * s; return `<li><span class="q">${esc(q == null ? "" : qtyText(q, g.unit) + " " + unitText(g.unit, q))}</span><span>${esc(g.item)}${g.prep ? `, ${esc(g.prep)}` : ""}</span></li>`; }).join("");
   const ahead = [num(r.doughKeepsDays) ? `Dough keeps ${r.doughKeepsDays} day${num(r.doughKeepsDays) > 1 ? "s" : ""} in the fridge.` : "", r.freezable ? "Freezes well." : "", r.makeAheadTip || ""].filter(Boolean).join(" ");
   const notes = (r.notes || []).slice().reverse().map(n => `<div class="note">${esc(n.text)}<small>${esc(noteStamp(n))}</small></div>`).join("");
-  $("#print-root").innerHTML = `<article class="pr"><h1>${esc(r.name)}</h1>${meta ? `<p class="meta">${esc(meta)}</p>` : ""}
-    ${src || from ? `<p class="src">${src ? `Original recipe: ${esc(src)}` : ""}${src && from ? " · " : ""}${from ? `From ${esc(from)}` : ""}</p>` : ""}
+  const pic = mainCookiePhoto(r);
+  $("#print-root").innerHTML = `<article class="pr"><header class="pr-head${pic ? " with-pic" : ""}"><div><h1>${esc(r.name)}</h1>${meta ? `<p class="meta">${esc(meta)}</p>` : ""}
+    ${src || from ? `<p class="src">${src ? `Original recipe: ${esc(src)}` : ""}${src && from ? " · " : ""}${from ? `From ${esc(from)}` : ""}</p>` : ""}</div>
+    ${pic ? `<img class="pr-pic" alt="" src="${esc(imgSrc(pic))}">` : ""}</header>
     <div class="cols"><section><h2>Ingredients</h2><ul class="ing">${ings}</ul></section>
     <section><h2>Method</h2>${(r.steps || []).length ? `<ol>${r.steps.map(x => `<li>${esc(x)}</li>`).join("")}</ol>` : "<p>No method saved.</p>"}
       ${ahead ? `<h2>Make ahead</h2><p>${esc(ahead)}</p>` : ""}${r.decorating ? `<h2>Decorating</h2><p>${esc(r.decorating)}</p>` : ""}</section></div>
@@ -1208,7 +1244,9 @@ function printRecipe(r) {
     <p class="foot">Cookie Repo · printed ${esc(new Date().toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }))}${r.owner ? ` · ${esc(personName(r.owner))}'s recipe` : ""}</p></article>`;
   runPrint("printing-recipe", r.name);
 }
-function runPrint(cls, title) {
+async function runPrint(cls, title) {
+  // Wait (briefly) for any photo on the printout to load, so it isn't blank.
+  await Promise.race([Promise.all([...document.querySelectorAll("#print-root img")].map(im => im.complete ? 0 : new Promise(r => { im.onload = im.onerror = r; }))), new Promise(r => setTimeout(r, 4000))]);
   const old = document.title; document.title = title ? `${title} · Cookie Repo` : old; // becomes the PDF's file name
   document.body.classList.add(cls);
   const done = () => { document.body.classList.remove(cls); document.title = old; window.removeEventListener("afterprint", done); };
@@ -1271,6 +1309,7 @@ document.addEventListener("click", async e => {
     } catch (err) { if (S.modal === m) { m.relink = { busy: false, msg: `${err.message} The details from your photo are unchanged.` }; renderModal(); } }
   }
   else if (a === "img-rm") { S.confirmImg = el.dataset.img; renderModal(); }
+  else if (a === "img-main") { try { const d = await api("POST", `/api/images/${encodeURIComponent(el.dataset.img)}/main`); const r = getR(id); if (r) r.images = d.images; toast("Main photo set"); } catch (err) { writeErr(err); } render(); renderModal(); }
   else if (a === "img-rm-no") { S.confirmImg = null; renderModal(); }
   else if (a === "img-rm-yes") {
     const imgId = S.confirmImg; S.confirmImg = null;
@@ -1374,7 +1413,8 @@ document.addEventListener("change", e => {
   else if (c === "plan") { const k = el.dataset.k; S.plan[k] = el.type === "checkbox" ? el.checked : (["ovens", "sheetsPerOven"].includes(k) ? Number(el.value) : el.value); savePlan(); }
   else if (c === "have") { S.plan.have = { ...(S.plan.have || {}) }; if (el.checked) S.plan.have[el.dataset.key] = true; else delete S.plan.have[el.dataset.key]; savePlan(); }
   else if (el.id === "imp-file" || el.id === "imp-cam") { addFiles(el.files); el.value = ""; }
-  else if (el.dataset.addphoto) { const files = [...el.files]; el.value = ""; if (files.length) uploadPhotos(el.dataset.addphoto, files); }
+  else if (el.dataset.addphoto) { const files = [...el.files]; el.value = ""; if (files.length) uploadPhotos(el.dataset.addphoto, files, el.dataset.kind || "original"); }
+  else if (el.id === "ed-usecrop" && S.modal?.draft) S.modal.draft.useCrop = el.checked;
   else if (el.dataset.f === "freezable" && S.modal?.draft) S.modal.draft.freezable = el.checked;
   else if (el.dataset.ing != null && el.tagName === "SELECT") S.modal.draft.ingredients[Number(el.dataset.ing)][el.dataset.k] = el.value;
 });

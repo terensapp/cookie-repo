@@ -9,7 +9,7 @@ A cookie recipe box, bake-day planner and shopping list for a household.
 - **Shop**: one combined list for everything on the plan, minus what's already in the pantry, with butter in sticks and flour and sugar in pounds.
 - **Print or save as PDF**: a clean one-page recipe at your batch size, plus the bake-day plan and shopping list.
 - **Duplicate warnings**: recipes with nearly the same name or mostly the same ingredients are flagged, on import (with a check before saving) and in the recipe box, with the ingredient differences.
-- **Notes** on each recipe for next time, plus the original photos at full size and a link to the recipe online. If a photographed page shows a web address, Claude saves it as the link.
+- **Notes** on each recipe for next time, plus photos of the finished cookies (shown on the recipe card and printout) and the original recipe photos at full size. When a photographed recipe page includes a picture of the cookies, Claude finds it and it is cropped out as the cookie photo and a link to the recipe online. If a photographed page shows a web address, Claude saves it as the link.
 - **Sign-in by emailed code**, limited to the people on the Settings list.
 
 ## How it's built

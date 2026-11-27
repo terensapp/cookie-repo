@@ -57,6 +57,11 @@ db.exec(`
   );
 `);
 
+/* Photos are either the original recipe pages or pictures of the finished cookies. Added after launch, so add the column if missing. */
+if (!db.prepare("PRAGMA table_info(recipe_images)").all().some((c) => c.name === "kind")) {
+  db.exec("ALTER TABLE recipe_images ADD COLUMN kind TEXT NOT NULL DEFAULT 'original'");
+}
+
 export function getKV(key, fallback = null) {
   const row = db.prepare("SELECT value FROM kv WHERE key = ?").get(key);
   return row ? JSON.parse(row.value) : fallback;

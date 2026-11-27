@@ -107,9 +107,9 @@ app.use("/api", (req, res, next) => {
 const people = () => { const m = memberOf(); return auth.listAllowed().map(({ email, name }) => ({ email, name, pantry: m[email] || "" })); };
 function imagesByRecipe() {
   const m = new Map();
-  for (const i of db.prepare("SELECT id, recipe_id, type, size, page, has_thumb FROM recipe_images ORDER BY page, created_at").all()) {
+  for (const i of db.prepare("SELECT id, recipe_id, type, size, page, has_thumb, kind FROM recipe_images ORDER BY page, created_at").all()) {
     if (!m.has(i.recipe_id)) m.set(i.recipe_id, []);
-    m.get(i.recipe_id).push({ id: i.id, type: i.type, size: i.size, thumb: !!i.has_thumb });
+    m.get(i.recipe_id).push({ id: i.id, type: i.type, size: i.size, thumb: !!i.has_thumb, kind: i.kind || "original" });
   }
   return m;
 }
@@ -399,6 +399,7 @@ app.post("/api/recipes/:id/images", rawImage, (req, res) => {
   if (!db.prepare("SELECT 1 FROM recipes WHERE id = ?").get(id)) return res.status(404).json({ error: "Save the recipe before adding photos." });
   if (limit(`img:${req.email}`, 120, 3600_000)) return res.status(429).json({ error: "Too many photos for one hour. Try again later." });
   const count = db.prepare("SELECT COUNT(*) AS n FROM recipe_images WHERE recipe_id = ?").get(id).n;
+  const kind = req.query.kind === "cookie" ? "cookie" : "original";
   if (count >= MAX_IMAGES_PER_RECIPE) return res.status(400).json({ error: `A recipe can keep up to ${MAX_IMAGES_PER_RECIPE} photos.` });
   const buf = Buffer.isBuffer(req.body) ? req.body : null;
   const type = buf && sniffImage(buf);
@@ -406,7 +407,7 @@ app.post("/api/recipes/:id/images", rawImage, (req, res) => {
   const imgId = crypto.randomUUID();
   fs.writeFileSync(imagePath(imgId), buf);
   const page = Number.isInteger(Number(req.query.page)) ? Number(req.query.page) : count;
-  db.prepare("INSERT INTO recipe_images (id, recipe_id, type, size, page, created_at) VALUES (?, ?, ?, ?, ?, ?)").run(imgId, id, type, buf.length, page, new Date().toISOString());
+  db.prepare("INSERT INTO recipe_images (id, recipe_id, type, size, page, created_at, kind) VALUES (?, ?, ?, ?, ?, ?, ?)").run(imgId, id, type, buf.length, page, new Date().toISOString(), kind);
   res.json({ id: imgId, images: recipeImages(id) });
 });
 
@@ -432,6 +433,15 @@ app.get("/api/images/:imgId", (req, res) => {
     "Content-Disposition": `${req.query.download ? "attachment" : "inline"}; filename="recipe-photo.${thumb ? "jpg" : ext}"`,
   });
   res.sendFile(imagePath(row.id, thumb));
+});
+
+/* Make a cookie photo the main one: it moves to the front, so it's the one on the card and the printout. */
+app.post("/api/images/:imgId/main", (req, res) => {
+  const row = db.prepare("SELECT recipe_id, kind FROM recipe_images WHERE id = ?").get(req.params.imgId);
+  if (!row) return res.status(404).json({ error: "That photo was removed." });
+  const min = db.prepare("SELECT MIN(page) AS p FROM recipe_images WHERE recipe_id = ? AND kind = ?").get(row.recipe_id, row.kind).p ?? 0;
+  db.prepare("UPDATE recipe_images SET page = ? WHERE id = ?").run(min - 1, req.params.imgId);
+  res.json({ images: recipeImages(row.recipe_id) });
 });
 
 app.delete("/api/images/:imgId", (req, res) => {

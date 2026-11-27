@@ -30,6 +30,14 @@ const Recipe = z.object({
   makeAheadTip: z.string().describe("one short sentence"),
   decorating: z.string().describe("icing or decorating after baking; empty if none"),
   decorateMinutes: z.number().describe("0 if none"),
+  cookiePhoto: z.object({
+    found: z.boolean().describe("true only if an attached image contains a real photograph of the finished cookies (not a drawing, icon, logo or the recipe text)"),
+    image: z.number().describe("which attached image the photograph is in, counting from 1; 0 if none"),
+    left: z.number().describe("left edge of the photograph, as a fraction of that image's width (0 to 1)"),
+    top: z.number().describe("top edge, as a fraction of the image's height (0 to 1)"),
+    right: z.number().describe("right edge, as a fraction of the image's width (0 to 1)"),
+    bottom: z.number().describe("bottom edge, as a fraction of the image's height (0 to 1)"),
+  }).describe("where a photo of the finished cookies appears in the attached images, so it can be cropped out; found=false and zeros when there are no images or no such photo"),
 });
 
 const INSTRUCTIONS = `Extract the cookie recipe in this source into structured data for a home baking planner.
@@ -57,7 +65,7 @@ export async function extractRecipe({ text = "", images = [] }) {
     {
       type: "text",
       text: images.length
-        ? `${INSTRUCTIONS}\n\nThe recipe is in the ${images.length > 1 ? `${images.length} attached photos, in page order` : "attached photo"}. Read every ingredient carefully, including handwritten notes.${text ? `\n\nNote from the baker: ${text}` : ""}`
+        ? `${INSTRUCTIONS}\n\nThe recipe is in the ${images.length > 1 ? `${images.length} attached photos, in page order` : "attached photo"}. Read every ingredient carefully, including handwritten notes. If a page also shows a photograph of the finished cookies, give its bounding box in cookiePhoto so it can be cropped out: the edges of the photograph itself, not the whole page.${text ? `\n\nNote from the baker: ${text}` : ""}`
         : `${INSTRUCTIONS}\n\n<source>\n${text}\n</source>`,
     },
   ];
