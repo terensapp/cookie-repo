@@ -207,7 +207,8 @@ function personSelect(id, value, attrs, label, includeNone) {
 /* ---------- selections & scaling ---------- */
 const getR = id => S.recipes.find(r => r.id === id);
 function selectedList() {
-  return Object.entries(S.plan.selections || {}).map(([id, v]) => ({ r: getR(id), scale: num(v && v.scale) || 1, baker: (v && v.baker) || "" })).filter(x => x.r);
+  const main = mainBakeOf(S.plan);
+  return Object.entries(S.plan.selections || {}).map(([id, v]) => ({ r: getR(id), scale: num(v && v.scale) || 1, baker: (v && v.baker) || "", mixOnly: !!(main && (S.plan.mixOnly || (v && v.mixOnly))) })).filter(x => x.r);
 }
 function setBaker(id, email) { if (S.plan.selections?.[id]) { S.plan.selections[id].baker = email; savePlan(); } }
 function scaleOf(id) { return S.plan.selections?.[id] ? (num(S.plan.selections[id].scale) || 1) : (S.viewScale[id] || 1); }
@@ -230,12 +231,14 @@ function scaleControl(r) {
 /* ---------- schedule ---------- */
 /* A prebake set to "mix dough only": its doughs bake on the main bake's day instead. */
 const mainBakeOf = P => P.partOf ? allBakes().find(b => b.id === P.partOf) : null;
-const isMixOnly = P => !!(P.mixOnly && mainBakeOf(P));
+/* A cookie on a prebake can be "mix only": the dough is made there and baked at the main bake. (P.mixOnly is the older all-cookies setting.) */
+const selMixOnly = (b, v) => !!(b.partOf && (b.mixOnly || (v && v.mixOnly)));
+const isMixOnly = P => { const sels = Object.values(P.selections || {}); return !!mainBakeOf(P) && sels.length > 0 && sels.every(v => selMixOnly(P, v)); };
 const daysBetween = (a, b) => Math.round((parseDate(b) - parseDate(a)) / 86400000);
 /* Doughs mixed at this bake's mix-only prebakes, to be baked here. */
 function incomingDoughs(P = S.plan) {
-  return allBakes().filter(b => b.partOf === P.id && b.mixOnly).sort(byDate).flatMap(b =>
-    Object.entries(b.selections || {}).map(([id, v]) => ({ r: getR(id), scale: num(v && v.scale) || 1, baker: (v && v.baker) || "", fromBake: b })).filter(x => x.r));
+  return allBakes().filter(b => b.partOf === P.id).sort(byDate).flatMap(b =>
+    Object.entries(b.selections || {}).filter(([, v]) => selMixOnly(b, v)).map(([id, v]) => ({ r: getR(id), scale: num(v && v.scale) || 1, baker: (v && v.baker) || "", fromBake: b })).filter(x => x.r));
 }
 /* How a mixed dough should wait until baking: fridge if it keeps that long, else freezer, else a warning. */
 function doughStorage(it, days) {
@@ -245,29 +248,31 @@ function doughStorage(it, days) {
   return { how: "warn", text: `Heads up: baking is ${days} day${days > 1 ? "s" : ""} away, but this dough keeps ${it.keeps ? `only ${it.keeps} day${it.keeps > 1 ? "s" : ""}` : "no time"} and isn't marked as freezing well. Consider mixing it closer to the bake.` };
 }
 function schedule() {
-  const P = S.plan, own = selectedList(), mixOnly = isMixOnly(P), incoming = mixOnly ? [] : incomingDoughs(P);
+  const P = S.plan, own = selectedList(), mixOnly = isMixOnly(P), main = mainBakeOf(P), incoming = main ? [] : incomingDoughs(P);
   const sel = [...own, ...incoming]; if (!sel.length) return null;
   const T0 = toMin(P.start), nOv = mixOnly ? 0 : clamp(num(P.ovens) || 1, 1, 3), cap = clamp(num(P.sheetsPerOven) || 2, 1, 4), PRE = 15;
-  const items = sel.map(({ r, scale, baker, fromBake }, i) => {
+  const items = sel.map(({ r, scale, baker, fromBake, mixOnly: mixHere }, i) => {
     const yieldN = num(r.yieldCount) || 24, count = Math.max(1, Math.round(yieldN * scale)), per = Math.max(1, num(r.cookiesPerSheet) || 12);
     const prepBase = num(r.prepMinutes) || 20, prep = Math.round(prepBase * (scale > 1 ? 1 + (scale - 1) * 0.3 : 1));
     const chill = num(r.chillMinutes), keeps = num(r.doughKeepsDays);
-    const ahead = fromBake ? "prebake" : mixOnly ? "" : chill >= 180 ? "required" : (P.aheadAll && keeps >= 1 ? "chosen" : "");
-    return { r, scale, baker, fromBake, color: (i % 6) + 1, count, per, sheets: Math.ceil(count / per), prep, chill, keeps, freezable: !!r.freezable, temp: num(r.ovenTempF) || 350, bake: num(r.bakeMinutes) || 11, cool: num(r.coolMinutes) || 10, deco: num(r.decorateMinutes), ahead, lastOut: 0, firstIn: null };
+    const ahead = fromBake ? "prebake" : mixHere ? "" : chill >= 180 ? "required" : (P.aheadAll && keeps >= 1 ? "chosen" : "");
+    return { r, scale, baker, fromBake, mixOnly: !!mixHere, color: (i % 6) + 1, count, per, sheets: Math.ceil(count / per), prep, chill, keeps, freezable: !!r.freezable, temp: num(r.ovenTempF) || 350, bake: num(r.bakeMinutes) || 11, cool: num(r.coolMinutes) || 10, deco: num(r.decorateMinutes), ahead, lastOut: 0, firstIn: null };
   });
   const before = items.filter(it => it.ahead);
   const today = items.filter(it => !it.ahead).sort((a, b) => b.chill - a.chill || a.temp - b.temp);
   let t = T0;
   for (const it of today) { it.mixStart = t; it.mixEnd = t + it.prep; t = it.mixEnd; it.ready = it.mixEnd + it.chill; }
   for (const it of before) it.ready = T0;
-  if (mixOnly) { // nothing goes in the oven today: mix, then store the dough for the main bake
-    const main = mainBakeOf(P), days = daysBetween(P.bakeDate, main.bakeDate);
-    for (const it of items) it.store = doughStorage(it, days);
+  const days = main ? daysBetween(P.bakeDate, main.bakeDate) : 0;
+  const stored = items.filter(it => it.mixOnly); // mixed here, baked at the main bake
+  for (const it of stored) it.store = doughStorage(it, days);
+  if (mixOnly) { // nothing goes in the oven today
     const end = Math.max(T0, ...items.map(it => it.mixEnd));
-    return { items, before: [], today, rounds: [], ovenEvents: [], temps: [], T0, end, nOv: 0, cap, PRE, sheets: items.reduce((a, i) => a + i.sheets, 0), mixOnly: true, main, days };
+    return { items, before: [], today, rounds: [], ovenEvents: [], temps: [], T0, end, nOv: 0, cap, PRE, sheets: items.reduce((a, i) => a + i.sheets, 0), mixOnly: true, stored, main, days };
   }
   for (const it of items) if (it.fromBake) it.store = doughStorage(it, daysBetween(it.fromBake.bakeDate, P.bakeDate));
-  const rem = []; items.forEach(it => { for (let k = 0; k < it.sheets; k++) rem.push({ it }); });
+  const baked = items.filter(it => !it.mixOnly);
+  const rem = []; baked.forEach(it => { for (let k = 0; k < it.sheets; k++) rem.push({ it }); });
   const ovens = Array.from({ length: nOv }, (_, i) => ({ i, free: T0 + PRE, temp: null }));
   const rounds = [], ovenEvents = []; let guard = 0;
   while (rem.length && guard++ < 600) {
@@ -285,10 +290,11 @@ function schedule() {
     o.free = tt + dur + 3; o.temp = temp;
   }
   let end = Math.max(T0, ...rounds.map(r => r.end));
-  for (const it of items) { it.coolEnd = it.lastOut + it.cool; it.decoEnd = it.coolEnd + (it.deco || 0); end = Math.max(end, it.decoEnd); }
-  const temps = [...new Set(items.map(i => i.temp))].sort((a, b) => a - b).map(tp => ({ temp: tp, items: items.filter(i => i.temp === tp) }));
-  const sheets = items.reduce((a, i) => a + i.sheets, 0);
-  return { items, before, today, rounds, ovenEvents, temps, T0, end, nOv, cap, PRE, sheets };
+  for (const it of baked) { it.coolEnd = it.lastOut + it.cool; it.decoEnd = it.coolEnd + (it.deco || 0); end = Math.max(end, it.decoEnd); }
+  for (const it of stored) end = Math.max(end, it.mixEnd);
+  const temps = [...new Set(baked.map(i => i.temp))].sort((a, b) => a - b).map(tp => ({ temp: tp, items: baked.filter(i => i.temp === tp) }));
+  const sheets = baked.reduce((a, i) => a + i.sheets, 0);
+  return { items, before, today, rounds, ovenEvents, temps, T0, end, nOv, cap, PRE, sheets, stored, main, days };
 }
 
 /* ---------- shopping ---------- */
@@ -553,11 +559,11 @@ function recipeResults() {
 function viewPlan() {
   const P = S.plan, sel = selectedList(), sc = schedule();
   const fam = family(), mainId = fam[0]?.id || P.id, isMain = mainId === P.id;
-  const tabsRow = `<div class="bake-tabs" role="group" aria-label="Bakes in this event">${fam.length > 1 ? fam.map(b => `<button class="bake-tab" data-act="${b.id === P.id ? "noop" : "bake-open"}" data-id="${esc(b.id)}" aria-pressed="${b.id === P.id}"><b>${esc(b.name)}</b><span>${b.id === mainId ? "Main bake" : b.mixOnly ? "Prebake · mix only" : "Prebake"} · ${esc(fmtDay(parseDate(b.bakeDate)))}</span></button>`).join("") : ""}<button class="btn sm" data-act="prebake-new" data-id="${esc(mainId)}">+ Add prebake</button></div>`;
+  const tabsRow = `<div class="bake-tabs" role="group" aria-label="Bakes in this event">${fam.length > 1 ? fam.map(b => `<button class="bake-tab" data-act="${b.id === P.id ? "noop" : "bake-open"}" data-id="${esc(b.id)}" aria-pressed="${b.id === P.id}"><b>${esc(b.name)}</b><span>${b.id === mainId ? "Main bake" : (() => { const v = Object.values(b.selections || {}); const n = v.filter(x => selMixOnly(b, x)).length; return n && n === v.length ? "Prebake · mix only" : n ? "Prebake · some mix only" : "Prebake"; })()} · ${esc(fmtDay(parseDate(b.bakeDate)))}</span></button>`).join("") : ""}<button class="btn sm" data-act="prebake-new" data-id="${esc(mainId)}">+ Add prebake</button></div>`;
   const hasKids = S.bakes.some(b => b.partOf === P.id);
   const mains = allBakes().filter(b => b.id !== P.id && !(b.partOf && S.bakes.some(x => x.id === b.partOf))).sort(byDate).reverse();
   const partOfField = `<label class="field"><span class="label">Part of</span><select id="p-partof" data-change="plan" data-k="partOf" ${hasKids ? "disabled title=\"This bake has prebakes, so it stays a main bake\"" : ""}><option value="">Nothing. This is a main bake</option>${mains.map(b => `<option value="${esc(b.id)}" ${P.partOf === b.id ? "selected" : ""}>${esc(b.name)}</option>`).join("")}</select></label>`;
-  const settings = `<section class="panel"><div class="settings">
+  const settings = `<section class="panel no-print"><div class="settings">
     <label class="field bake-name"><span class="label">Name</span><input id="p-name" class="inp" data-change="plan" data-k="name" value="${esc(P.name)}" maxlength="80" placeholder="${esc(bakeNameFor(P.bakeDate))}"></label>
     ${partOfField}
     <label class="field"><span class="label">Bake day</span><input type="date" id="p-date" data-change="plan" data-k="bakeDate" value="${esc(P.bakeDate)}"></label>
@@ -565,30 +571,30 @@ function viewPlan() {
     ${isMixOnly(P) ? "" : `<label class="field"><span class="label">Ovens</span><select id="p-ovens" data-change="plan" data-k="ovens">${[1, 2, 3].map(n => `<option ${num(P.ovens) === n ? "selected" : ""}>${n}</option>`).join("")}</select></label>
     <label class="field"><span class="label">Sheets per oven</span><select id="p-sheets" data-change="plan" data-k="sheetsPerOven">${[1, 2, 3, 4].map(n => `<option ${num(P.sheetsPerOven) === n ? "selected" : ""}>${n}</option>`).join("")}</select></label>
     <label class="check"><input type="checkbox" id="p-ahead" data-change="plan" data-k="aheadAll" ${P.aheadAll ? "checked" : ""}>Mix doughs the night before when they keep</label>`}
-    ${mainBakeOf(P) ? `<label class="check"><input type="checkbox" id="p-mixonly" data-change="plan" data-k="mixOnly" ${P.mixOnly ? "checked" : ""}>Mix dough only. Bake it on ${esc(mainBakeOf(P).name)} day (${esc(fmtDay(parseDate(mainBakeOf(P).bakeDate)))})</label>` : ""}
   </div></section>`;
   const others = S.bakes.length - 1;
   const head = `<div class="page-head"><div><h1>${esc(P.name || "Bake plan")}</h1><p class="muted">${!isMain ? `Prebake for ${esc(fam[0].name)} · ` : ""}${esc(fmtDay(parseDate(P.bakeDate)))}${sel.length ? ` · ${sel.length} cookie${sel.length > 1 ? "s" : ""}` : ""}</p></div>
-    <button class="btn" data-act="bakes">${others > 0 ? `All bakes (${S.bakes.length})` : "All bakes"}</button><button class="btn primary" data-act="bake-new">New bake</button></div>`;
+    <button class="btn" data-act="print-page">Print / PDF</button><button class="btn" data-act="bakes">${others > 0 ? `All bakes (${S.bakes.length})` : "All bakes"}</button><button class="btn primary" data-act="bake-new">New bake</button></div>`;
   const past = P.bakeDate < isoDate(new Date()) ? `<div class="banner">This bake was on ${esc(fmtDay(parseDate(P.bakeDate)))}. Changes here update that record. Planning the next one? <button class="btn sm" data-act="bake-copy" data-id="${esc(P.id)}">Start a new bake from this one</button></div>` : "";
   const gone = Object.entries(P.selections || {}).filter(([id]) => !getR(id));
   const goneNote = gone.length ? `<p class="muted" style="font-size:.88rem">Left off this plan: ${gone.map(([, v]) => esc(v?.name || "a recipe")).join(", ")} (no longer in the recipe box).</p>` : "";
-  const notes = `<section class="panel"><div class="panel-head"><h2>Notes on this bake</h2></div><textarea id="p-notes" class="inp" rows="3" data-change="plan" data-k="notes" maxlength="5000" placeholder="How it went, what ran out, what to change next time">${esc(P.notes || "")}</textarea></section>`;
+  const notes = `<section class="panel ${(P.notes || "").trim() ? "" : "no-print"}"><div class="panel-head"><h2>Notes on this bake</h2></div><textarea id="p-notes" class="inp" rows="3" data-change="plan" data-k="notes" maxlength="5000" placeholder="How it went, what ran out, what to change next time">${esc(P.notes || "")}</textarea></section>`;
   if (!sc) return head + tabsRow + past + settings + goneNote + `<div class="empty"><h2>Nothing on the baking list</h2><p class="muted">Pick recipes in the recipe box with “+ Bake”. You'll get a make-ahead list, which cookies can share the oven, and a timed bake-day schedule.</p><button class="btn primary" data-act="tab" data-tab="recipes">Choose recipes</button></div>` + notes;
   const picked = `<section class="panel"><div class="panel-head"><h2>${sc.mixOnly ? "Mixing" : "Baking"}</h2><span class="muted">${sc.sheets} sheet${sc.sheets > 1 ? "s" : ""} · ${sc.items.reduce((a, i) => a + i.count, 0)} cookies</span></div><div class="sel-list">${sc.items.map(it => it.fromBake ? `
     <div class="sel-row"><span class="dot" style="background:var(--c${it.color})"></span>
       <div style="min-width:0"><div class="nm"><a href="#" data-act="open" data-id="${esc(it.r.id)}" style="color:inherit">${esc(it.r.name)}</a></div><div class="sub">${it.count} cookies · ${it.sheets} sheet${it.sheets > 1 ? "s" : ""} of ${it.per} · ${it.temp}°F · dough mixed at ${esc(it.fromBake.name)}${it.baker ? ` by ${esc(personName(it.baker))}` : ""}</div></div>
       <button class="btn ghost sm" data-act="bake-open" data-id="${esc(it.fromBake.id)}">Open ${esc(it.fromBake.name)}</button></div>` : `
     <div class="sel-row"><span class="dot" style="background:var(--c${it.color})"></span>
-      <div style="min-width:0"><div class="nm"><a href="#" data-act="open" data-id="${esc(it.r.id)}" style="color:inherit">${esc(it.r.name)}</a></div><div class="sub">${it.count} cookies · ${it.sheets} sheet${it.sheets > 1 ? "s" : ""} of ${it.per} · ${it.temp}°F</div></div>
+      <div style="min-width:0"><div class="nm"><a href="#" data-act="open" data-id="${esc(it.r.id)}" style="color:inherit">${esc(it.r.name)}</a></div><div class="sub">${it.count} cookies · ${it.mixOnly ? `dough only, bakes ${esc(fmtDay(parseDate(sc.main.bakeDate)))}` : `${it.sheets} sheet${it.sheets > 1 ? "s" : ""} of ${it.per} · ${it.temp}°F`}</div></div>
       <label class="who">Baker ${personSelect(`baker-${it.r.id}`, it.baker, `class="inp" data-change="baker" data-id="${esc(it.r.id)}"`, `Baker for ${it.r.name}`, "Unassigned")}</label>
+      ${sc.main ? `<label class="who">Bake <select id="mix-${esc(it.r.id)}" class="inp" data-change="sel-mixonly" data-id="${esc(it.r.id)}" aria-label="Where ${esc(it.r.name)} is baked"><option value="" ${it.mixOnly ? "" : "selected"}>here</option><option value="1" ${it.mixOnly ? "selected" : ""}>mix only, bake at ${esc(sc.main.name)}</option></select></label>` : ""}
       ${scaleControl(it.r)}
       <button class="btn ghost sm" data-act="toggle" data-id="${esc(it.r.id)}" aria-label="Remove ${esc(it.r.name)}">Remove</button></div>`).join("")}</div>
     ${goneNote}${sc.mixOnly ? `<div class="summary"><span>Mixing done by <b>${fmtT(sc.end)}</b></span><span>Bakes <b>${esc(fmtDay(parseDate(sc.main.bakeDate)))}</b></span></div>` : ""}<div class="summary" ${sc.mixOnly ? "hidden" : ""}><span>Done by <b>${fmtT(sc.end)}</b></span><span>Oven rounds <b>${sc.rounds.length}</b></span><span>Sheet pans <b>${Math.min(sc.sheets, sc.cap * sc.nOv * 2)}</b></span></div></section>`;
 
   // make ahead
   const bd = parseDate(P.bakeDate), eve = new Date(bd); eve.setDate(bd.getDate() - 1);
-  const optional = sc.items.filter(it => !it.ahead && (it.keeps >= 1 || it.freezable));
+  const optional = sc.items.filter(it => !it.ahead && !it.mixOnly && (it.keeps >= 1 || it.freezable));
   let ahead = `<section class="panel"><div class="panel-head"><h2>Make ahead</h2><span class="muted">${esc(fmtDay(eve))}</span></div>`;
   if (sc.before.length) {
     ahead += sc.before.filter(it => it.fromBake).map(it => `<div class="task"><span class="when">${it.store.how === "freezer" ? "Evening" : "Ready"}</span><p><b>${esc(it.r.name)} dough</b> comes from ${esc(it.fromBake.name)} (${esc(fmtDay(parseDate(it.fromBake.bakeDate)))}).${bakerTag(it)}</p><span class="sub">${it.store.how === "freezer" ? "It was frozen: move it to the fridge tonight to thaw." : esc(it.store.text)}</span></div>`).join("");
@@ -614,14 +620,12 @@ function viewPlan() {
   const rem = sel.filter(x => (x.r.notes || []).length);
   const reminders = rem.length ? `<section class="panel"><div class="panel-head"><h2>Notes from last time</h2></div><div class="notes">${rem.map(x => [...x.r.notes].slice(-2).reverse().map(n => `<div class="note"><span class="d">${esc(x.r.name)} · ${esc(fmtNoteDate(n.at))}${n.by ? ` · ${esc(personName(n.by))}` : ""}</span><p>${esc(n.text)}</p></div>`).join("")).join("")}</div></section>` : "";
 
-  if (sc.mixOnly) {
-    const store = `<section class="panel"><div class="panel-head"><h2>Storing the dough</h2><span class="muted">until ${esc(fmtDay(parseDate(sc.main.bakeDate)))}</span></div>
-      <p class="muted" style="font-size:.88rem">These doughs bake on ${esc(sc.main.name)} day, ${sc.days} day${sc.days === 1 ? "" : "s"} after mixing, and show up on its schedule.</p>
-      ${sc.items.map(it => `<div class="task ${it.store.how === "warn" ? "warn" : ""}"><span class="when">${it.store.how === "freezer" ? "Freeze" : it.store.how === "warn" ? "Check" : "Fridge"}</span><p><b>${esc(it.r.name)}</b>${bakerTag(it)}</p><span class="sub">${esc(it.store.text)}</span></div>`).join("")}
-      <button class="btn sm" data-act="bake-open" data-id="${esc(sc.main.id)}" style="align-self:flex-start">Open ${esc(sc.main.name)}</button></section>`;
-    return head + tabsRow + past + settings + picked + store + reminders + viewTimeline(sc) + notes;
-  }
-  return head + tabsRow + past + settings + picked + `<div class="two">${ahead}${share}</div>` + reminders + viewTimeline(sc) + notes;
+  const store = sc.stored?.length ? `<section class="panel"><div class="panel-head"><h2>Storing the dough</h2><span class="muted">until ${esc(fmtDay(parseDate(sc.main.bakeDate)))}</span></div>
+      <p class="muted" style="font-size:.88rem">${sc.mixOnly ? "These doughs" : "The mix-only doughs"} bake on ${esc(sc.main.name)} day, ${sc.days} day${sc.days === 1 ? "" : "s"} after mixing, and show up on its schedule.</p>
+      ${sc.stored.map(it => `<div class="task ${it.store.how === "warn" ? "warn" : ""}"><span class="when">${it.store.how === "freezer" ? "Freeze" : it.store.how === "warn" ? "Check" : "Fridge"}</span><p><b>${esc(it.r.name)}</b>${bakerTag(it)}</p><span class="sub">${esc(it.store.text)}</span></div>`).join("")}
+      <button class="btn sm" data-act="bake-open" data-id="${esc(sc.main.id)}" style="align-self:flex-start">Open ${esc(sc.main.name)}</button></section>` : "";
+  if (sc.mixOnly) return head + tabsRow + past + settings + picked + store + reminders + viewTimeline(sc) + notes;
+  return head + tabsRow + past + settings + picked + store + `<div class="two">${ahead}${share}</div>` + reminders + viewTimeline(sc) + notes;
 }
 /* Who's doing what on the day: each baker's cookies, sheets, mixing time and busy window. */
 const bakerTag = it => it.baker ? `<span class="baker">${esc(personName(it.baker))}</span>` : "";
@@ -631,9 +635,9 @@ function viewWho(sc, ev) {
   if (groups.size === 1 && groups.has("")) return `<p class="muted" style="font-size:.88rem">No bakers assigned yet. Pick a baker for each cookie above to see who does what.</p>`;
   const rows = [...groups].sort(([a], [b]) => (a === "") - (b === "") || personName(a).localeCompare(personName(b))).map(([email, its]) => {
     const mine = ev.filter(e => e.its.some(i => (i.baker || "") === email));
-    const start = Math.min(...mine.map(e => e.t)), end = Math.max(...its.map(i => sc.mixOnly ? i.mixEnd : (i.decoEnd ?? i.coolEnd ?? i.mixEnd)));
-    const mix = its.filter(i => i.mixStart != null).reduce((a, i) => a + i.prep, 0), sheets = its.reduce((a, i) => a + i.sheets, 0);
-    const facts = [sc.mixOnly ? "" : `${sheets} sheet${sheets === 1 ? "" : "s"}`, mix ? `${fmtDur(mix)} mixing` : "", its.some(i => i.fromBake) ? "uses prebake dough" : "", isFinite(start) && isFinite(end) ? `${fmtT(start)} – ${fmtT(end)}` : ""].filter(Boolean).join(" · ");
+    const start = Math.min(...mine.map(e => e.t)), end = Math.max(...its.map(i => i.mixOnly ? i.mixEnd : (i.decoEnd ?? i.coolEnd ?? i.mixEnd)));
+    const mix = its.filter(i => i.mixStart != null).reduce((a, i) => a + i.prep, 0), sheets = its.filter(i => !i.mixOnly).reduce((a, i) => a + i.sheets, 0);
+    const facts = [sheets ? `${sheets} sheet${sheets === 1 ? "" : "s"}` : "", mix ? `${fmtDur(mix)} mixing` : "", its.some(i => i.fromBake) ? "uses prebake dough" : "", isFinite(start) && isFinite(end) ? `${fmtT(start)} – ${fmtT(end)}` : ""].filter(Boolean).join(" · ");
     const active = S.bakerFilter === email && email;
     return `<div class="who-row ${email ? "" : "unassigned"} ${active ? "on" : ""}"><div style="min-width:0"><div class="nm">${email ? esc(personName(email)) : "No baker yet"}</div>
       <div class="sub">${its.map(i => `<span class="dot" style="background:var(--c${i.color})"></span>${esc(i.r.name)}`).join(" ")}</div><div class="sub">${facts}</div></div>
@@ -665,7 +669,7 @@ function viewTimeline(sc) {
   const tag = its => { const names = [...new Set(its.map(i => i.baker))]; return { bakers: names, html: names.filter(Boolean).map(b => `<span class="baker">${esc(personName(b))}</span>`).join("") }; };
   for (const it of sc.today) ev.push({ t: it.mixStart, its: [it], txt: `<b>Mix ${esc(it.r.name)} dough</b>${it.scale !== 1 ? ` (${scaleLabel(it.scale)})` : ""}`, sub: it.chill ? `${fmtDur(it.prep)}, then chill until ${fmtT(it.ready)}` : `${fmtDur(it.prep)}` });
   if (sc.before.length) ev.push({ t: sc.T0, its: sc.before, txt: `Take the make-ahead dough out of the fridge`, sub: sc.before.map(i => i.r.name + (i.fromBake ? ` (from ${i.fromBake.name})` : "")).join(", ") + ". Let stiff dough sit 10 min before scooping or rolling." });
-  if (sc.mixOnly) for (const it of sc.items) ev.push({ t: it.mixEnd, its: [it], txt: `${it.store.how === "freezer" ? "Wrap and freeze" : "Wrap and refrigerate"} the ${esc(it.r.name)} dough`, sub: `It bakes on ${fmtDay(parseDate(sc.main.bakeDate))} at ${sc.main.name}.` });
+  for (const it of sc.stored || []) ev.push({ t: it.mixEnd, its: [it], txt: `${it.store.how === "freezer" ? "Wrap and freeze" : "Wrap and refrigerate"} the ${esc(it.r.name)} dough`, sub: `It bakes on ${fmtDay(parseDate(sc.main.bakeDate))} at ${sc.main.name}.` });
   for (const e of sc.ovenEvents) {
     const its = sc.rounds.filter(r => r.oven === e.oven && r.start >= e.end - 1).slice(0, 1).flatMap(r => r.groups.map(g => g.it));
     ev.push({ t: e.start, its, txt: e.kind === "preheat" ? `Preheat ${sc.nOv > 1 ? `oven ${e.oven + 1}` : "the oven"} to ${e.temp}°F` : `${e.temp > e.from ? "Turn up" : "Turn down"} ${sc.nOv > 1 ? `oven ${e.oven + 1}` : "the oven"} to ${e.temp}°F`, sub: e.kind === "adjust" ? `Give it ${fmtDur(e.end - e.start)} to settle.` : "" });
@@ -692,16 +696,16 @@ function viewShopping() {
   const sel = shopSelections(), f = S.shopFilter, P = S.plan;
   const fam = family(), ids = shopBakeIds(), all = allBakes(), scope = P.shopScope || "this";
   const names = ids.map(id => all.find(b => b.id === id)?.name).filter(Boolean);
-  const scopeBar = `<div class="seg shop-scope" role="group" aria-label="Shopping list for">
+  const scopeBar = `<div class="seg shop-scope no-print" role="group" aria-label="Shopping list for">
       <button data-act="shop-scope" data-scope="this" aria-pressed="${scope === "this"}">This bake</button>
       ${fam.length > 1 && curPantry() && fam.filter(b => pantryIdOf(b) === pantryIdOf(P)).length > 1 && fam.some(b => pantryIdOf(b) !== pantryIdOf(P)) ? `<button data-act="shop-scope" data-scope="pantry" aria-pressed="${scope === "pantry"}">Everything using ${esc(curPantry().name)}</button>` : ""}
       ${fam.length > 1 ? `<button data-act="shop-scope" data-scope="event" aria-pressed="${scope === "event"}">${esc(fam[0].name)} + ${fam.length - 1} prebake${fam.length > 2 ? "s" : ""}</button>` : ""}
       <button data-act="shop-scope" data-scope="custom" aria-pressed="${scope === "custom"}">Choose bakes</button></div>
-    ${scope === "custom" ? `<div class="panel shop-pick">${all.slice().sort(byDate).reverse().map(b => `<label class="check"><input type="checkbox" data-change="shop-bake" data-id="${esc(b.id)}" ${ids.includes(b.id) ? "checked" : ""}>${esc(b.name)} <span class="muted">· ${esc(fmtDay(parseDate(b.bakeDate)))}</span></label>`).join("")}</div>` : ""}`;
+    ${scope === "custom" ? `<div class="panel shop-pick no-print">${all.slice().sort(byDate).reverse().map(b => `<label class="check"><input type="checkbox" data-change="shop-bake" data-id="${esc(b.id)}" ${ids.includes(b.id) ? "checked" : ""}>${esc(b.name)} <span class="muted">· ${esc(fmtDay(parseDate(b.bakeDate)))}</span></label>`).join("")}</div>` : ""}`;
   const bakers = [...new Set(sel.map(x => x.baker).filter(Boolean))];
   const shown = f ? sel.filter(x => x.baker === f) : sel;
   const filter = bakers.length > 1 ? `<label class="who">For ${personSelect("shop-filter", f, `data-change="shop-filter"`, "Show one baker's shopping", "Everyone")}</label>` : "";
-  const head = `<div class="page-head"><div><h1>Shopping list</h1><p class="muted">${names.length > 1 ? `Combining ${names.map(esc).join(", ")}` : esc(S.plan.name || "This bake")} · ${names.length > 1 ? `${shown.length} cookie batch${shown.length === 1 ? "" : "es"}` : shown.length ? `For ${shown.map(x => `${esc(x.r.name)}${x.scale !== 1 ? ` (${scaleLabel(x.scale)})` : ""}`).join(", ")}` : "Built from everything on the baking list"}</p></div>${filter}${sel.length ? `<button class="btn" data-act="copy-list">Copy list</button><button class="btn ghost" data-act="clear-have">Uncheck all</button>` : ""}</div>`;
+  const head = `<div class="page-head"><div><h1>Shopping list</h1><p class="muted">${names.length > 1 ? `Combining ${names.map(esc).join(", ")}` : esc(S.plan.name || "This bake")} · ${names.length > 1 ? `${shown.length} cookie batch${shown.length === 1 ? "" : "es"}` : shown.length ? `For ${shown.map(x => `${esc(x.r.name)}${x.scale !== 1 ? ` (${scaleLabel(x.scale)})` : ""}`).join(", ")}` : "Built from everything on the baking list"}</p></div>${filter}${sel.length ? `<button class="btn" data-act="print-page">Print / PDF</button><button class="btn" data-act="copy-list">Copy list</button><button class="btn ghost" data-act="clear-have">Uncheck all</button>` : ""}</div>`;
   let list;
   if (!sel.length) list = `<div class="empty"><h2>No recipes picked yet</h2><p class="muted">Add cookies to the bake plan and their ingredients are combined here, scaled to your batch sizes, minus what's already in your pantry.</p><button class="btn primary" data-act="tab" data-tab="recipes">Choose recipes</button></div>`;
   else {
@@ -723,13 +727,13 @@ function viewPantry() {
   const manage = `<div style="display:flex;gap:6px;flex-wrap:wrap"><button class="btn sm ghost" data-act="pantry-new">+ New pantry</button>${pan ? `<button class="btn sm ghost danger" data-act="pantry-remove" style="border-color:transparent">Delete this pantry</button>` : ""}</div>`;
   const combined = used.length > 1 ? `<p class="banner" style="font-size:.85rem">This list subtracts ${used.map(p => `<b>${esc(p.name)}</b>`).join(" and ")}, since its bakes use different pantries.</p>` : "";
   const confirmRemove = S.confirmPantryRemove && pan ? `<div class="confirm"><span>Delete ${esc(pan.name)} and its ${pan.items.length} item${pan.items.length === 1 ? "" : "s"}? Bakes using it will have no pantry.</span><button class="btn danger solid sm" data-act="pantry-remove-yes">Delete</button><button class="btn sm" data-act="pantry-remove-no">Keep</button></div>` : "";
-  if (!pan) return `<section class="panel"><div class="panel-head"><h2>Pantry</h2></div>${picker}${combined}<p class="muted" style="font-size:.88rem">${S.pantries.length ? "This bake doesn't use a pantry, so nothing is subtracted for it." : "No pantries yet. Make one for each kitchen."}</p>${manage}</section>`;
+  if (!pan) return `<section class="panel no-print"><div class="panel-head"><h2>Pantry</h2></div>${picker}${combined}<p class="muted" style="font-size:.88rem">${S.pantries.length ? "This bake doesn't use a pantry, so nothing is subtracted for it." : "No pantries yet. Make one for each kitchen."}</p>${manage}</section>`;
   const rows = pan.items.map((p, i) => `<div class="ing-row" style="grid-template-columns:64px 76px minmax(0,1fr) 30px">
       <input id="pt-${i}-qty" data-pantry="${i}" data-k="qty" value="${esc(p.qty == null ? "" : String(p.qty))}" placeholder="5" aria-label="Amount">
       <select id="pt-${i}-unit" data-pantry="${i}" data-k="unit" aria-label="Unit">${UNITS.map(u => `<option value="${u}" ${u === p.unit ? "selected" : ""}>${u || "—"}</option>`).join("")}</select>
       <input id="pt-${i}-item" data-pantry="${i}" data-k="item" value="${esc(p.item)}" placeholder="all-purpose flour" aria-label="Item">
       <button class="x" data-act="pantry-del" data-i="${i}" aria-label="Remove ${esc(p.item || "item")}" style="font-size:1.1rem">×</button></div>`).join("");
-  return `<section class="panel"><div class="panel-head"><h2>${esc(pan.name)}</h2><span class="muted">${pan.items.length} item${pan.items.length === 1 ? "" : "s"}</span></div>
+  return `<section class="panel no-print"><div class="panel-head"><h2>${esc(pan.name)}</h2><span class="muted">${pan.items.length} item${pan.items.length === 1 ? "" : "s"}</span></div>
     ${picker}
     <label class="field"><span class="label">Pantry name</span><input id="pantry-name" class="inp" data-change="pantry-name" value="${esc(pan.name)}" maxlength="60" placeholder="e.g. Sapp's pantry"></label>
     ${combined}
@@ -854,7 +858,7 @@ function viewDetail(r) {
       ${(r.steps || []).length ? `<div><span class="label">Method</span><ol class="steps" style="margin-top:8px">${r.steps.map(x => `<li>${esc(x)}</li>`).join("")}</ol></div>` : ""}
       ${S.confirmDelete === r.id ? `<div class="confirm"><span>Delete ${esc(r.name)} and its notes for good?</span><button class="btn danger solid sm" data-act="del-yes" data-id="${esc(r.id)}">Delete</button><button class="btn sm" data-act="del-no">Keep it</button></div>` : ""}
     </div>
-    <div class="sheet-foot"><button class="btn ghost danger" data-act="del-ask" data-id="${esc(r.id)}" style="margin-right:auto;border-color:transparent">Delete</button><button class="btn" data-act="edit" data-id="${esc(r.id)}">Edit recipe</button><button class="btn primary" data-act="close">Done</button></div>
+    <div class="sheet-foot"><button class="btn ghost danger" data-act="del-ask" data-id="${esc(r.id)}" style="margin-right:auto;border-color:transparent">Delete</button><button class="btn" data-act="print-recipe" data-id="${esc(r.id)}">Print / PDF</button><button class="btn" data-act="edit" data-id="${esc(r.id)}">Edit recipe</button><button class="btn primary" data-act="close">Done</button></div>
   </div>`;
 }
 
@@ -1031,6 +1035,32 @@ async function uploadPhotos(recipeId, files) {
   if (!failed) toast(files.length > 1 ? `${files.length} photos saved` : "Photo saved");
 }
 
+/* ---------- printing (the browser's print dialog also saves as PDF) ---------- */
+function printRecipe(r) {
+  const s = scaleOf(r.id), src = safeUrl(r.link) || safeUrl(r.source), from = safeUrl(r.source) || /^photo$/i.test(r.source || "") ? "" : (r.source || "");
+  const times = [["Prep", r.prepMinutes], ["Chill", r.chillMinutes], ["Bake", r.bakeMinutes], ["Cool", r.coolMinutes]].filter(x => num(x[1])).map(([k, v]) => `${k} ${fmtDur(num(v))}`);
+  const meta = [r.yieldCount ? `Makes ${Math.round(num(r.yieldCount) * s)} cookies${s !== 1 ? ` (${scaleLabel(s)} batch)` : ""}` : (s !== 1 ? `${scaleLabel(s)} batch` : ""), r.ovenTempF ? `${r.ovenTempF}°F` : "", ...times, r.cookiesPerSheet ? `${r.cookiesPerSheet} per sheet` : ""].filter(Boolean).join(" · ");
+  const ings = (r.ingredients || []).map(g => { const q = g.qty == null || g.qty === "" ? null : num(g.qty) * s; return `<li><span class="q">${esc(q == null ? "" : qtyText(q, g.unit) + " " + unitText(g.unit, q))}</span><span>${esc(g.item)}${g.prep ? `, ${esc(g.prep)}` : ""}</span></li>`; }).join("");
+  const ahead = [num(r.doughKeepsDays) ? `Dough keeps ${r.doughKeepsDays} day${num(r.doughKeepsDays) > 1 ? "s" : ""} in the fridge.` : "", r.freezable ? "Freezes well." : "", r.makeAheadTip || ""].filter(Boolean).join(" ");
+  const notes = (r.notes || []).slice().reverse().map(n => `<div class="note">${esc(n.text)}<small>${esc(noteStamp(n))}</small></div>`).join("");
+  $("#print-root").innerHTML = `<article class="pr"><h1>${esc(r.name)}</h1>${meta ? `<p class="meta">${esc(meta)}</p>` : ""}
+    ${src || from ? `<p class="src">${src ? `Original recipe: ${esc(src)}` : ""}${src && from ? " · " : ""}${from ? `From ${esc(from)}` : ""}</p>` : ""}
+    <div class="cols"><section><h2>Ingredients</h2><ul class="ing">${ings}</ul></section>
+    <section><h2>Method</h2>${(r.steps || []).length ? `<ol>${r.steps.map(x => `<li>${esc(x)}</li>`).join("")}</ol>` : "<p>No method saved.</p>"}
+      ${ahead ? `<h2>Make ahead</h2><p>${esc(ahead)}</p>` : ""}${r.decorating ? `<h2>Decorating</h2><p>${esc(r.decorating)}</p>` : ""}</section></div>
+    ${notes ? `<h2>Notes</h2>${notes}` : ""}
+    <p class="foot">Cookie Repo · printed ${esc(new Date().toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }))}${r.owner ? ` · ${esc(personName(r.owner))}'s recipe` : ""}</p></article>`;
+  runPrint("printing-recipe", r.name);
+}
+function runPrint(cls, title) {
+  const old = document.title; document.title = title ? `${title} · Cookie Repo` : old; // becomes the PDF's file name
+  document.body.classList.add(cls);
+  const done = () => { document.body.classList.remove(cls); document.title = old; window.removeEventListener("afterprint", done); };
+  window.addEventListener("afterprint", done);
+  setTimeout(() => window.print(), 50);
+  setTimeout(() => { if (!matchMedia("print").matches) done(); }, 60000); // safety net if afterprint never fires
+}
+
 /* ---------- events ---------- */
 function toast(msg) { const t = $("#toast"); t.textContent = msg; t.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => { t.hidden = true; }, 2600); }
 function go(tab) { S.tab = tab; if (location.hash.slice(1) !== tab) location.hash = tab; render(); window.scrollTo(0, 0); }
@@ -1104,6 +1134,8 @@ document.addEventListener("click", async e => {
   else if (a === "link-edit") { S.editLink = id; renderModal(); $("#link-input")?.focus(); }
   else if (a === "link-cancel") { S.editLink = null; renderModal(); }
   else if (a === "who-show") { const em = el.dataset.email; if (S.bakerFilter === em) { S.bakerFilter = ""; S.hideOthers = false; } else { S.bakerFilter = em; S.hideOthers = true; } render(); }
+  else if (a === "print-recipe") { const r = getR(id); if (r) printRecipe(r); }
+  else if (a === "print-page") runPrint("printing-page", S.tab === "shopping" ? `${S.plan.name || "Shopping"} shopping list` : S.plan.name || "Bake plan");
   else if (a === "dupe-add") { S.modal.dupeOk = true; S.modal.dupeAsk = null; saveDraft($('[data-act="ed-save"]')); }
   else if (a === "dupe-filter") { S.dupeFilter = !S.dupeFilter; render(); }
   else if (a === "not-dupe") {
@@ -1158,6 +1190,11 @@ document.addEventListener("change", e => {
   const el = e.target, c = el.dataset.change;
   if (c === "baker") setBaker(el.dataset.id, el.value);
   else if (c === "owner-filter") { S.ownerFilter = el.value; render(); }
+  else if (c === "sel-mixonly") {
+    const P = S.plan;
+    if (P.mixOnly) { for (const v of Object.values(P.selections || {})) v.mixOnly = true; P.mixOnly = false; }
+    const v = P.selections?.[el.dataset.id]; if (v) { v.mixOnly = el.value === "1"; savePlan(); }
+  }
   else if (c === "baker-filter") { S.bakerFilter = el.value; if (!el.value) S.hideOthers = false; render(); }
   else if (c === "hide-others") { S.hideOthers = el.checked; render(); }
   else if (c === "shop-filter") { S.shopFilter = el.value; render(); }

@@ -141,7 +141,7 @@ function bakeList() {
     const cookies = Object.entries(b.selections || {}).map(([id, v]) => names.get(id) || v?.name || "Deleted recipe");
     const bakers = [...new Set(Object.values(b.selections || {}).map((v) => v?.baker).filter(Boolean))];
     // Selections ride along so a shopping list can combine several bakes.
-    const selections = Object.fromEntries(Object.entries(b.selections || {}).map(([id, v]) => [id, { scale: v?.scale, baker: v?.baker || "", name: v?.name || names.get(id) || "" }]));
+    const selections = Object.fromEntries(Object.entries(b.selections || {}).map(([id, v]) => [id, { scale: v?.scale, baker: v?.baker || "", name: v?.name || names.get(id) || "", mixOnly: !!v?.mixOnly }]));
     return { id: b.id, name: b.name, bakeDate: b.bakeDate, partOf: b.partOf || "", pantryId: b.pantryId, usePantry: b.usePantry, mixOnly: !!b.mixOnly, cookies, bakers, selections, createdAt: row.created_at };
   }).sort((a, b) => String(b.bakeDate).localeCompare(String(a.bakeDate)) || String(b.createdAt).localeCompare(String(a.createdAt)));
 }

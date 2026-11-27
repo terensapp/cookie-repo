@@ -236,6 +236,32 @@ main{padding-block:24px 64px;display:flex;flex-direction:column;gap:20px}
 .who-row .sub .dot{margin-right:-6px}
 .who-row.unassigned .nm{color:var(--warn)}
 .who-row.on{background:var(--accent-soft);border-radius:8px;padding-left:8px;padding-right:8px}
+#print-root{display:none}
+.pr{font:11pt/1.45 Georgia,"Times New Roman",serif;color:#000;max-width:7.5in}
+.pr h1{font-size:21pt;line-height:1.15;margin:0 0 4pt}
+.pr .meta{font:9.5pt/1.4 -apple-system,system-ui,sans-serif;color:#333;margin:0 0 3pt}
+.pr .src{font:9pt/1.4 -apple-system,system-ui,sans-serif;color:#333;margin:0 0 10pt;overflow-wrap:anywhere}
+.pr h2{font:700 9pt/1.2 -apple-system,system-ui,sans-serif;text-transform:uppercase;letter-spacing:.08em;margin:14pt 0 5pt;color:#333}
+.pr .cols{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.5fr);gap:20pt}
+.pr ul.ing{list-style:none;padding:0;margin:0}
+.pr ul.ing li{display:grid;grid-template-columns:5.6em minmax(0,1fr);gap:6pt;padding:2.5pt 0;border-bottom:.5pt solid #ddd;break-inside:avoid}
+.pr ul.ing .q{font:700 10.5pt/1.45 Georgia,"Times New Roman",serif;color:#000;white-space:nowrap;text-align:left}
+.pr ol{margin:0;padding-left:15pt}
+.pr ol li{margin:0 0 5pt;break-inside:avoid}
+.pr .note{border-left:2pt solid #bbb;padding:1pt 0 1pt 7pt;margin:0 0 6pt;break-inside:avoid}
+.pr .note small{display:block;color:#555;font:8.5pt -apple-system,system-ui,sans-serif}
+.pr .foot{margin-top:16pt;padding-top:4pt;border-top:.5pt solid #bbb;font:8pt -apple-system,system-ui,sans-serif;color:#666}
+@media print{
+  @page{margin:13mm}
+  html,body{background:#fff !important}
+  *{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  body.printing-recipe > *:not(#print-root){display:none !important}
+  body.printing-recipe #print-root{display:block}
+  body.printing-page header.top,body.printing-page #modal,body.printing-page #toast,body.printing-page .btn,body.printing-page .toggle,body.printing-page .no-print,body.printing-page .bake-tabs,body.printing-page .banner,body.printing-page .x{display:none !important}
+  body.printing-page .panel{box-shadow:none;border:1px solid #ccc;break-inside:avoid-page}
+  body.printing-page .task{break-inside:avoid}
+  body.printing-page select{appearance:none;-webkit-appearance:none;border:0;background:none;padding:0;font-weight:600}
+}
 .photo-btns{display:flex;gap:8px;flex-wrap:wrap}
 .photo-btns label.btn{cursor:pointer}
 .status{display:flex;gap:10px;align-items:center;font-size:.9rem;padding:10px 12px;border-radius:8px;background:var(--surface-2)}
@@ -310,6 +336,7 @@ main{padding-block:24px 64px;display:flex;flex-direction:column;gap:20px}
 </main>
 <div id="modal" class="modal" hidden></div>
 <div id="toast" class="toast" role="status" hidden></div>
+<div id="print-root" aria-hidden="true"></div>
 <script src="/app.js"></script>
 </body>
 </html>
