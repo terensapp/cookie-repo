@@ -236,6 +236,10 @@ main{padding-block:24px 64px;display:flex;flex-direction:column;gap:20px}
 .who-row .sub .dot{margin-right:-6px}
 .who-row.unassigned .nm{color:var(--warn)}
 .who-row.on{background:var(--accent-soft);border-radius:8px;padding-left:8px;padding-right:8px}
+.help{display:inline-flex;align-items:center;justify-content:center;width:17px;height:17px;margin:0 2px;padding:0;border-radius:50%;border:1px solid var(--line);background:var(--surface);color:var(--muted);font:700 11px/1 system-ui,sans-serif;cursor:help;vertical-align:middle;text-transform:none;letter-spacing:0;flex:none;position:relative}
+.help::after{content:"";position:absolute;inset:-6px}
+.help:hover,.help:focus-visible,.help[aria-describedby]{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
+#help-tip{position:fixed;z-index:60;background:var(--ink);color:var(--bg);font:500 .84rem/1.45 system-ui,-apple-system,sans-serif;padding:8px 11px;border-radius:8px;box-shadow:0 6px 24px rgba(0,0,0,.18);pointer-events:none;text-transform:none;letter-spacing:0}
 #print-root{display:none}
 .pr{font:11pt/1.45 Georgia,"Times New Roman",serif;color:#000;max-width:7.5in}
 .pr h1{font-size:21pt;line-height:1.15;margin:0 0 4pt}
@@ -257,7 +261,7 @@ main{padding-block:24px 64px;display:flex;flex-direction:column;gap:20px}
   *{-webkit-print-color-adjust:exact;print-color-adjust:exact}
   body.printing-recipe > *:not(#print-root){display:none !important}
   body.printing-recipe #print-root{display:block}
-  body.printing-page header.top,body.printing-page #modal,body.printing-page #toast,body.printing-page .btn,body.printing-page .toggle,body.printing-page .no-print,body.printing-page .bake-tabs,body.printing-page .banner,body.printing-page .x{display:none !important}
+  body.printing-page header.top,body.printing-page #modal,body.printing-page #toast,body.printing-page .btn,body.printing-page .toggle,body.printing-page .no-print,body.printing-page .bake-tabs,body.printing-page .banner,body.printing-page .x,.help,#help-tip{display:none !important}
   body.printing-page .panel{box-shadow:none;border:1px solid #ccc;break-inside:avoid-page}
   body.printing-page .task{break-inside:avoid}
   body.printing-page select{appearance:none;-webkit-appearance:none;border:0;background:none;padding:0;font-weight:600}
