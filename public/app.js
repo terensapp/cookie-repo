@@ -67,11 +67,24 @@ const IMG_MAX = 8;
 const TOUCH = matchMedia("(pointer: coarse)").matches;
 
 /* ---------- server ---------- */
+/* When the app is updated while this tab is open, reload to the new version as soon as it's safe. */
+let appVersion = "";
+function noteVersion(res) {
+  const v = res.headers.get("X-App-Version"); if (!v) return;
+  if (!appVersion) { appVersion = v; return; }
+  if (v !== appVersion && !S.newVersion) { S.newVersion = true; reloadIfSafe() || render(); }
+}
+function reloadIfSafe() {
+  if (!S.newVersion || S.modal || typing() || planTimer || planWriting || Object.keys(pantryTimers).length || S.uploading) return false;
+  location.reload(); return true;
+}
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") reloadIfSafe(); });
 async function api(method, url, body) {
   let res;
   try {
     res = await fetch(url, { method, headers: body ? { "Content-Type": "application/json" } : {}, body: body ? JSON.stringify(body) : undefined, credentials: "same-origin" });
   } catch { throw { status: 0, message: "Can't reach Cookie Repo. Check your connection and try again." }; }
+  noteVersion(res);
   const data = await res.json().catch(() => ({}));
   if (res.status === 401 && !url.startsWith("/api/auth/")) { S.signedIn = false; S.loaded = true; render(); }
   if (!res.ok) throw { status: res.status, message: data.error || "Something went wrong. Try again." };
@@ -407,6 +420,7 @@ function render() {
 function preserve(root) { const a = document.activeElement; return { id: a && root.contains(a) ? a.id : null, scroll: window.scrollY }; }
 function restore(k) { if (k.id) { const el = document.getElementById(k.id); if (el) el.focus({ preventScroll: true }); } }
 function notices() {
+  if (S.newVersion) return `<div class="banner warn">Cookie Repo was updated. Reload to get the latest version; nothing you've saved will be lost. <button class="btn sm" data-act="reload-page">Reload</button></div>` + (S.loadError ? `<div class="banner warn">${esc(S.loadError)}</div>` : "");
   return S.loadError ? `<div class="banner warn">${esc(S.loadError)} <button class="btn sm" data-act="reload">Try again</button></div>` : "";
 }
 
@@ -685,7 +699,7 @@ const fmtNoteDate = s => { const d = new Date(s); return isNaN(d) ? "" : d.toLoc
 const noteStamp = n => { const d = new Date(n.at); const when = isNaN(d) ? "" : `${fmtNoteDate(n.at)}, ${d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}`; const edited = n.editedAt ? `edited${n.editedBy && n.editedBy !== n.by ? ` by ${personName(n.editedBy)}` : ""} ${fmtNoteDate(n.editedAt)}` : ""; return [when, n.by ? personName(n.by) : "", edited].filter(Boolean).join(" · "); };
 
 /* ---------- modals ---------- */
-function openModal(m) { S.modal = m; S.confirmDelete = null; S.editNote = null; S.confirmNote = null; renderModal(); }
+function openModal(m) { S.modal = m; S.confirmDelete = null; S.editLink = null; S.editNote = null; S.confirmNote = null; renderModal(); }
 function closeModal() { if (S.importCtl) { S.importCtl.abort(); S.importCtl = null; } S.modal = null; const el = $("#modal"); el.hidden = true; el.innerHTML = ""; document.body.style.overflow = ""; }
 function renderModal() {
   const m = S.modal, el = $("#modal"); if (!m) return;
@@ -734,6 +748,16 @@ function viewBakes() {
     <div class="sheet-head"><div><h2 id="bk-title">Bakes</h2><p class="muted" style="margin-top:4px">Each bake keeps its own cookies, schedule, shopping checks and notes. The pantry and recipes are shared by all of them.</p></div><button class="x" data-act="close" aria-label="Close">×</button></div>
     <div class="sheet-body">${form}<div>${rows}</div></div></div>`;
 }
+/* Where the recipe came from, always shown: the link (or a way to add one), and any book or other source. */
+function viewOrigin(r) {
+  const src = safeUrl(r.link) || safeUrl(r.source), from = safeUrl(r.source) || /^photo$/i.test(r.source || "") ? "" : (r.source || "");
+  let path = ""; try { path = new URL(src).pathname.replace(/\/$/, ""); } catch {}
+  const link = S.editLink === r.id
+    ? `<form class="link-form" data-form="link" novalidate data-id="${esc(r.id)}"><input id="link-input" class="inp" type="url" inputmode="url" placeholder="https://…" value="${esc(src)}" aria-label="Link to the original recipe"><button class="btn sm primary">Save link</button><button type="button" class="btn sm ghost" data-act="link-cancel">Cancel</button></form>`
+    : src ? `<a href="${esc(src)}" target="_blank" rel="noopener noreferrer">${esc(hostOf(src))}${esc(path.length > 60 ? path.slice(0, 60) + "…" : path)} ↗</a> <button class="btn ghost sm" data-act="link-edit" data-id="${esc(r.id)}">Change</button>`
+    : `<span class="muted">No link saved.</span> <button class="btn sm" data-act="link-edit" data-id="${esc(r.id)}">+ Add link</button>`;
+  return `<div class="origin"><span class="label">Original recipe</span><div class="origin-line">${link}</div>${from ? `<div class="muted" style="font-size:.88rem">From ${esc(from)}</div>` : ""}</div>`;
+}
 function viewPhotos(r) {
   const imgs = r.images || [], up = S.uploading?.id === r.id ? S.uploading : null;
   const items = imgs.map((im, i) => `<figure class="thumb"><a href="/api/images/${esc(im.id)}" target="_blank" rel="noopener" title="Open full size"><img alt="Original photo ${i + 1}" loading="lazy" src="/api/images/${esc(im.id)}${im.thumb ? "?size=thumb" : ""}"></a>
@@ -748,7 +772,7 @@ function viewPhotos(r) {
 }
 const fmtSize = b => b >= 1048576 ? `${(b / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1024))} KB`;
 function viewDetail(r) {
-  const s = scaleOf(r.id), on = !!S.plan.selections?.[r.id], src = safeUrl(r.link) || safeUrl(r.source), from = safeUrl(r.source) ? "" : r.source;
+  const s = scaleOf(r.id), on = !!S.plan.selections?.[r.id];
   const ings = (r.ingredients || []).map(g => {
     const q = g.qty == null || g.qty === "" ? null : num(g.qty) * s;
     const odd = g.unit === "each" && q != null && q % 1 > 0.01 && /egg/i.test(g.item) ? " (whisk, then measure)" : "";
@@ -759,9 +783,10 @@ function viewDetail(r) {
     : `<div class="note"><span class="d">${esc(noteStamp(n))}</span><p>${esc(n.text)}</p><div class="note-acts"><button class="btn ghost sm" data-act="note-edit" data-note="${esc(n.id)}">Edit</button>${S.confirmNote === n.id ? `<button class="btn danger solid sm" data-act="del-note" data-id="${esc(r.id)}" data-note="${esc(n.id)}">Delete</button><button class="btn sm" data-act="note-cancel">Keep</button>` : `<button class="btn ghost sm" data-act="note-del-ask" data-note="${esc(n.id)}" aria-label="Delete note">Delete</button>`}</div></div>`).join("");
   const times = [["Prep", r.prepMinutes], ["Chill", r.chillMinutes], ["Bake", r.bakeMinutes], ["Cool", r.coolMinutes]].filter(x => num(x[1])).map(([k, v]) => `<span class="chip">${k} ${esc(fmtDur(num(v)))}</span>`).join("");
   return `<div class="sheet" role="dialog" aria-modal="true" aria-labelledby="dlg-title">
-    <div class="sheet-head"><div><h2 id="dlg-title">${esc(r.name)}</h2><div class="chips" style="margin-top:8px">${r.ovenTempF ? `<span class="chip temp">${esc(r.ovenTempF)}°F</span>` : ""}${times}${r.example ? `<span class="chip ex">Example recipe</span>` : ""}${r.owner ? `<span class="chip">Owner: ${esc(personName(r.owner))}</span>` : ""}</div>${src || from ? `<p style="margin-top:8px;font-size:.85rem">${src ? `<a href="${esc(src)}" target="_blank" rel="noopener noreferrer">Original recipe on ${esc(hostOf(src))} ↗</a>` : ""}${src && from ? " · " : ""}${from ? `<span class="muted">From ${esc(from)}</span>` : ""}</p>` : ""}</div><button class="x" data-act="close" aria-label="Close">×</button></div>
+    <div class="sheet-head"><div><h2 id="dlg-title">${esc(r.name)}</h2><div class="chips" style="margin-top:8px">${r.ovenTempF ? `<span class="chip temp">${esc(r.ovenTempF)}°F</span>` : ""}${times}${r.example ? `<span class="chip ex">Example recipe</span>` : ""}${r.owner ? `<span class="chip">Owner: ${esc(personName(r.owner))}</span>` : ""}</div></div><button class="x" data-act="close" aria-label="Close">×</button></div>
     <div class="sheet-body">
       ${(() => { const d = dupeMap().get(r.id), o = d && getR(d.other); return o ? `<div class="banner dupe-banner"><span><b>Possible duplicate of ${esc(o.name)}</b> · ${esc(d.why)}.<br><span class="muted" style="font-size:.85rem">${esc(diffText(d.onlyHere, d.onlyThere, o.name))}</span></span><span style="display:flex;gap:6px;flex-wrap:wrap"><button class="btn sm" data-act="open" data-id="${esc(o.id)}">Open ${esc(o.name)}</button><button class="btn sm ghost" data-act="not-dupe" data-id="${esc(r.id)}" data-other="${esc(o.id)}">Not a duplicate</button></span></div>` : ""; })()}
+      ${viewOrigin(r)}
       <div class="scale-box"><span class="label">Batch</span>${scaleControl(r)}<span class="out">${r.yieldCount ? `${Math.round(num(r.yieldCount) * s)} cookies` : ""}</span><button class="toggle" data-act="toggle" data-id="${esc(r.id)}" aria-pressed="${on}" style="margin-left:auto">${on ? "✓ On the bake plan" : "+ Add to bake plan"}</button></div>
       <div class="two"><div><span class="label">Ingredients${s !== 1 ? ` · scaled ${scaleLabel(s)}` : ""}</span><ul class="ing" style="margin-top:6px">${ings || `<li><span></span><span class="muted">No ingredients yet</span></li>`}</ul></div>
       <div style="display:flex;flex-direction:column;gap:12px"><div><span class="label">Notes for next time</span><div class="notes" style="margin-top:6px">${notes || `<p class="muted" style="font-size:.9rem">Nothing yet. Jot down what you'd change: bake a minute less, double the chips, chill overnight.</p>`}</div></div>
@@ -804,6 +829,7 @@ async function runExtract(payload, busyMsg) {
   IMP.busy = true; IMP.err = false; IMP.msg = busyMsg || "Claude is reading the recipe… this can take up to a minute."; renderModal();
   try {
     const res = await fetch("/api/extract", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), signal: ctl.signal });
+    noteVersion(res);
     const d = await res.json().catch(() => ({}));
     if (res.status === 401) { S.signedIn = false; closeModal(); render(); return; }
     if (!res.ok) throw new Error(d.error || "Something went wrong reading the recipe. Try again.");
@@ -845,7 +871,7 @@ async function importPhotos() {
 function draftFrom(j, source) {
   const n = v => (v == null || v === "" ? "" : String(Math.round(num(v) * 100) / 100));
   return {
-    id: uid(), name: String(j.name || "Untitled cookies"), link: fixLink(j.link) || (safeUrl(source) ? source : "") || String(j.link || ""), source: safeUrl(source) ? "" : String(source || ""), owner: j.owner || S.me.email, yieldCount: n(j.yieldCount), prepMinutes: n(j.prepMinutes), chillMinutes: n(j.chillMinutes), bakeMinutes: n(j.bakeMinutes), ovenTempF: n(j.ovenTempF), cookiesPerSheet: n(j.cookiesPerSheet), coolMinutes: n(j.coolMinutes), doughKeepsDays: n(j.doughKeepsDays), freezable: !!j.freezable, makeAheadTip: String(j.makeAheadTip || ""), decorating: String(j.decorating || ""), decorateMinutes: n(j.decorateMinutes),
+    id: uid(), name: String(j.name || "Untitled cookies"), link: fixLink(j.link) || (safeUrl(source) ? source : "") || String(j.link || ""), source: safeUrl(source) || /^photo$/i.test(source || "") ? "" : String(source || ""), owner: j.owner || S.me.email, yieldCount: n(j.yieldCount), prepMinutes: n(j.prepMinutes), chillMinutes: n(j.chillMinutes), bakeMinutes: n(j.bakeMinutes), ovenTempF: n(j.ovenTempF), cookiesPerSheet: n(j.cookiesPerSheet), coolMinutes: n(j.coolMinutes), doughKeepsDays: n(j.doughKeepsDays), freezable: !!j.freezable, makeAheadTip: String(j.makeAheadTip || ""), decorating: String(j.decorating || ""), decorateMinutes: n(j.decorateMinutes),
     ingredients: (j.ingredients || []).map(g => ({ qty: g.qty == null ? "" : frac(num(g.qty)).replace(/^(\d)([⅛¼⅓⅜½⅝⅔¾⅞])/, "$1 $2"), unit: UNITS.includes(String(g.unit || "").toLowerCase()) ? String(g.unit || "").toLowerCase() : "", item: String(g.item || ""), prep: String(g.prep || ""), category: CATS.includes(g.category) ? g.category : "Other" })),
     stepsText: (j.steps || []).map(String).join("\n"), notes: [],
   };
@@ -1017,6 +1043,9 @@ document.addEventListener("click", async e => {
   }
   else if (a === "clear-have") { S.plan.have = {}; savePlan(); }
   else if (a === "reload") loadState();
+  else if (a === "reload-page") { await settlePlan(); location.reload(); }
+  else if (a === "link-edit") { S.editLink = id; renderModal(); $("#link-input")?.focus(); }
+  else if (a === "link-cancel") { S.editLink = null; renderModal(); }
   else if (a === "dupe-add") { S.modal.dupeOk = true; S.modal.dupeAsk = null; saveDraft($('[data-act="ed-save"]')); }
   else if (a === "dupe-filter") { S.dupeFilter = !S.dupeFilter; render(); }
   else if (a === "not-dupe") {
@@ -1114,6 +1143,11 @@ document.addEventListener("submit", async e => {
   e.preventDefault();
   if (form === "email") requestCode(String($("#login-email").value || "").trim().toLowerCase());
   else if (form === "code") submitCode($("#login-code").value);
+  else if (form === "link") {
+    const r = getR(e.target.dataset.id), raw = $("#link-input").value.trim(), link = raw ? fixLink(raw) : "";
+    if (raw && !link) { toast("Enter the full web address, starting with https://"); return; }
+    if (r) { const rec = clone(r); rec.link = link; if (await saveRecipe(rec)) { S.editLink = null; toast(link ? "Link saved" : "Link removed"); renderModal(); } }
+  }
   else if (form === "bake") {
     const f = S.bakeForm; if (!f) return;
     f.name = $("#nb-name").value.trim(); f.bakeDate = $("#nb-date").value; f.copyFrom = $("#nb-copy").value; f.partOf = $("#nb-partof").value;

@@ -15,6 +15,10 @@ const PORT = Number(process.env.PORT || 8080);
 const app = express();
 app.set("trust proxy", 1);
 app.disable("x-powered-by");
+
+/* A fingerprint of the page's files. Every API reply carries it, so an open tab can tell when the app was updated under it. */
+const APP_VERSION = crypto.createHash("sha256").update(["index.html", "app.js"].map((f) => fs.readFileSync(path.join(here, "..", "public", f))).join("\n")).digest("hex").slice(0, 12);
+app.use("/api", (req, res, next) => { res.set("X-App-Version", APP_VERSION); next(); });
 auth.seedAllowed();
 
 /* ---------- one public address ----------
