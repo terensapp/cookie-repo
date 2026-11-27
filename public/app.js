@@ -1061,6 +1061,7 @@ async function runExtract(payload, busyMsg) {
     if (!res.ok) throw new Error(d.error || "Something went wrong reading the recipe. Try again.");
     IMP.busy = false; IMP.msg = ""; S.importCtl = null;
     const draft = draftFrom(d.recipe, d.recipe.source || "");
+    if (d.sitePhoto) attachSitePhoto(draft, d.sitePhoto);
     if (payload.kind === "images") {
       draft.photos = IMP.files; IMP.files = []; // the original photos are saved with the recipe
       const cp = d.recipe.cookiePhoto, page = cp?.found && draft.photos[Math.round(cp.image) - 1];
@@ -1134,7 +1135,7 @@ function viewEditor(d, isNew) {
         ${f("decorating", "Decorating", "text", "full", 'placeholder="Royal icing once fully cool"')}
         ${f("link", "Link to the original recipe", "url", "full", 'placeholder="https://…" inputmode="url"')}
         ${f("source", "Book or other source", "text", "full", 'placeholder="Grandma\'s recipe card, or a cookbook and page"')}
-        ${d.cookieCrop ? `<div class="full crop-offer"><span class="label">Cookie photo found on the page</span><div class="crop-row"><img alt="Cookie photo cropped from the recipe" src="${esc(d.cookieCrop.url)}"><label class="check"><input type="checkbox" id="ed-usecrop" ${d.useCrop ? "checked" : ""}>Save this as the cookie photo</label></div><p class="muted" style="font-size:.85rem">Claude spotted a picture of the cookies and cropped it out. Untick it if the crop looks wrong; you can add a cookie photo later.</p></div>` : ""}
+        ${d.cookieCrop ? `<div class="full crop-offer"><span class="label">${d.cookieCrop.from === "site" ? "Cookie photo from the website" : "Cookie photo found on the page"}</span><div class="crop-row"><img alt="Cookie photo cropped from the recipe" src="${esc(d.cookieCrop.url)}"><label class="check"><input type="checkbox" id="ed-usecrop" ${d.useCrop ? "checked" : ""}>Save this as the cookie photo</label></div><p class="muted" style="font-size:.85rem">${d.cookieCrop.from === "site" ? "This is the photo the recipe's website shows for it. Untick it if it isn't the cookie" : "Claude spotted a picture of the cookies and cropped it out. Untick it if the crop looks wrong"}; you can add a cookie photo later.</p></div>` : ""}
         ${d.photos?.length ? `<div class="full"><span class="label">Original photo${d.photos.length > 1 ? "s" : ""}</span><div class="thumbs" style="margin-top:6px">${d.photos.map((f, i) => `<figure class="thumb"><img alt="Page ${i + 1}" src="${esc(f.url)}"><figcaption>Page ${i + 1}</figcaption></figure>`).join("")}</div><p class="muted" style="font-size:.85rem;margin-top:6px">Saved with the recipe at full size.</p></div>` : ""}
       </div>
       <div class="ing-edit"><span class="label">Ingredients</span>
@@ -1169,9 +1170,17 @@ async function saveDraft(btn) {
   openModal({ type: "detail", id: rec.id });
   if (photos.length) await uploadPhotos(rec.id, photos.map(p => p.file));
   photos.forEach(p => URL.revokeObjectURL(p.url));
-  if (d.cookieCrop) { if (d.useCrop) await uploadPhotos(rec.id, [new File([d.cookieCrop.blob], "cookie.jpg", { type: "image/jpeg" })], "cookie"); URL.revokeObjectURL(d.cookieCrop.url); }
+  if (d.cookieCrop) { if (d.useCrop) await uploadPhotos(rec.id, [new File([d.cookieCrop.blob], `cookie.${(d.cookieCrop.blob.type.split("/")[1] || "jpg").replace("jpeg", "jpg")}`, { type: d.cookieCrop.blob.type || "image/jpeg" })], "cookie"); URL.revokeObjectURL(d.cookieCrop.url); }
 }
 
+/* The photo a recipe website shows for the recipe, offered as the cookie photo. */
+function attachSitePhoto(draft, p) {
+  try {
+    const bytes = Uint8Array.from(atob(p.data), c => c.charCodeAt(0)), blob = new Blob([bytes], { type: p.media_type });
+    if (draft.cookieCrop) URL.revokeObjectURL(draft.cookieCrop.url);
+    draft.cookieCrop = { blob, url: URL.createObjectURL(blob), from: "site" }; draft.useCrop = true;
+  } catch { /* a broken photo just isn't offered */ }
+}
 /* Cut the cookie photo Claude found out of the full-size original page, with a little margin since its box is approximate. */
 function cropPhoto(file, box) {
   const c01 = v => Math.min(1, Math.max(0, Number(v) || 0));
@@ -1305,6 +1314,7 @@ document.addEventListener("click", async e => {
       const r = await api("POST", "/api/extract", { kind: "url", url: d.link });
       if (S.modal !== m) return;
       const nd = draftFrom(r.recipe, ""); nd.id = d.id; nd.photos = d.photos; nd.owner = d.owner;
+      if (d.cookieCrop) { nd.cookieCrop = d.cookieCrop; nd.useCrop = d.useCrop; } else if (r.sitePhoto) attachSitePhoto(nd, r.sitePhoto);
       m.draft = nd; m.relink = null; toast("Read from the website. Check it over, then save."); renderModal();
     } catch (err) { if (S.modal === m) { m.relink = { busy: false, msg: `${err.message} The details from your photo are unchanged.` }; renderModal(); } }
   }

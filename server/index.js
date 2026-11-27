@@ -7,7 +7,7 @@ import { db, getKV, setKV, IMAGE_DIR } from "./db.js";
 import * as auth from "./auth.js";
 import { sendCode } from "./email.js";
 import { extractRecipe, ExtractError } from "./extract.js";
-import { fetchRecipePage } from "./fetchPage.js";
+import { fetchRecipePage, fetchRecipeImage } from "./fetchPage.js";
 import { EXAMPLES } from "./examples.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -323,8 +323,9 @@ app.post("/api/extract", wrap(async (req, res) => {
   if (kind === "url") {
     const page = await fetchRecipePage(url);
     source = { text: page.text };
+    const photo = page.imageUrl ? fetchRecipeImage(page.imageUrl) : null; // downloads while Claude reads
     const recipe = await extractRecipe(source);
-    return res.json({ recipe: { ...recipe, link: page.url } });
+    return res.json({ recipe: { ...recipe, link: page.url }, sitePhoto: await photo });
   }
   if (kind === "text") {
     if (String(text).trim().length < 40) return res.status(400).json({ error: "Paste the full recipe, including the ingredient list." });
