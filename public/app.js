@@ -60,6 +60,8 @@ const HELP = {
   batch: "Scale the recipe up or down. Amounts, cookie count and shopping all follow. On the bake plan, this is the batch you're making.",
   origin: "Where the recipe came from. Links from imports are saved automatically; add or change one any time.",
   notes: "Reminders for next time: what to change, how long it really took. Each note records who wrote it and when.",
+  units: "Show amounts as written in the recipe, in US cups and spoons, or in metric grams (ml for liquids). Converting between cups and grams uses typical weights for each ingredient. This view lasts until you reload; set your default in Settings.",
+  unitsDefault: "Which units recipes, printouts and shopping lists start in for you. Each person sets their own. The toggle on a recipe still switches for the moment.",
   cookiePhotos: "Pictures of the finished cookies. The main one (★) shows on the recipe card in the recipe box, at the top of the recipe, and on the printed recipe.",
   photos: "The original pictures of the recipe card or page, kept at full size. Tap one to open it; ↓ downloads it.",
   importLink: "Paste the address of a recipe page. Some sites block automated readers; if one does, take a screenshot and use Photo.",
@@ -169,6 +171,8 @@ async function loadState() {
   try {
     const d = await api("GET", "/api/state");
     S.signedIn = true; S.me = d.me || { email: "", name: "" }; S.people = d.people || [];
+    S.prefs = d.prefs || {};
+    if (!S.unitsTouched) S.units = S.prefs.units || "asis";
     S.recipes = (d.recipes || []).sort((a, b) => String(a.name).localeCompare(String(b.name)));
     if (!Object.keys(pantryTimers).length) S.pantries = Array.isArray(d.pantries) ? d.pantries : [];
     if (!planTimer && !planWriting) applyBakes(d);
@@ -481,7 +485,20 @@ function closestExisting(draft) {
   return best;
 }
 const diffText = (here, there, otherName) => [here.length ? `Only this one: ${here.slice(0, 6).join(", ")}${here.length > 6 ? "…" : ""}` : "", there.length ? `Only ${otherName}: ${there.slice(0, 6).join(", ")}${there.length > 6 ? "…" : ""}` : ""].filter(Boolean).join(" · ") || "Same ingredients";
-const DENS = [[/powdered|confectioner|icing sugar/, 120], [/brown sugar/, 213], [/sugar/, 200], [/bread flour/, 130], [/flour/, 125], [/cocoa/, 85], [/oat/, 90], [/chip|chocolate/, 170]];
+/* Grams per US cup, for converting between volume and weight. First match wins, so specific names come before general ones. */
+const DENS = [
+  [/powdered|confectioner|icing sugar/, 120], [/brown sugar/, 213], [/coarse sugar|sanding sugar|turbinado|demerara/, 220], [/sugar/, 200],
+  [/bread flour/, 130], [/cake flour|pastry flour/, 114], [/almond flour|almond meal/, 96], [/flour/, 125],
+  [/cocoa/, 85], [/cornstarch|corn starch/, 128], [/oat/, 90],
+  [/baking soda/, 230], [/baking powder/, 192], [/cream of tartar/, 150], [/kosher salt/, 145], [/salt/, 288],
+  [/espresso powder|instant coffee/, 70], [/cinnamon|ginger|nutmeg|clove|allspice|cardamom|pumpkin pie spice|spice/, 125],
+  [/extract|vanilla/, 208], [/peanut butter|almond butter|nut butter/, 256], [/cream cheese/, 232], [/sour cream|yogurt/, 240],
+  [/heavy cream|whipping cream|half and half/, 238], [/milk/, 242], [/water/, 236], [/oil/, 218],
+  [/honey/, 336], [/molasses/, 328], [/maple syrup/, 315], [/corn syrup|golden syrup/, 328], [/jam|preserves|jelly/, 320],
+  [/meringue powder/, 120], [/sprinkle|nonpareil/, 190], [/marshmallow/, 50], [/rice cereal|crispy rice|rice krispie/, 28], [/cereal|corn flake/, 30],
+  [/raisin|cranberr|dried cherr|dried fruit/, 150], [/coconut/, 85], [/pecan|walnut|almond|hazelnut|peanut|macadamia|pistachio|nut/, 120],
+  [/chip|chocolate|chunk|toffee|butterscotch/, 170],
+];
 function fmtVol(tsp) {
   if (tsp >= 12) { const c = tsp / 48; return `${frac(c)} ${c > 1.06 ? "cups" : "cup"}`; }
   if (tsp >= 3) { const tb = Math.floor(tsp / 3 + 1e-6), rest = tsp - tb * 3; return `${tb} tbsp${rest > 0.12 ? ` + ${frac(rest)} tsp` : ""}`; }
@@ -490,11 +507,43 @@ function fmtVol(tsp) {
 const fmtWt = g => g >= 450 ? `${(g / 453.6).toFixed(1).replace(/\.0$/, "")} lb` : `${Math.round(g)} g`;
 const DENS_BUTTER = 227;
 const densityOf = key => /butter/.test(key) && !/peanut|almond|cashew/.test(key) ? DENS_BUTTER : (DENS.find(([re]) => re.test(key)) || [])[1] || 0;
+const UNIT_MODES = [["asis", "As written"], ["us", "US"], ["metric", "Metric"]];
+const unitToggle = () => `<span class="seg units" role="group" aria-label="Units">${UNIT_MODES.map(([k, l]) => `<button data-act="units" data-mode="${k}" aria-pressed="${(S.units || "asis") === k}">${l}</button>`).join("")}${help("units", "Units")}</span>`;
+/* ---------- unit display: "asis" (as written), "us" (cups and spoons), "metric" (grams; ml for liquids) ---------- */
+const US_UNITS = ["tsp", "tbsp", "cup", "stick", "oz", "lb"], METRIC_UNITS = ["g", "kg", "ml", "l"];
+const roundG = g => g < 10 ? String(Math.round(g * 2) / 2) : String(Math.round(g));
+const metricText = (g, ml) => g != null ? (g >= 1000 ? `${(g / 1000).toFixed(2).replace(/0+$/, "").replace(/\.$/, "")} kg` : `${roundG(g)} g`) : (ml >= 1000 ? `${(ml / 1000).toFixed(2).replace(/0+$/, "").replace(/\.$/, "")} l` : `${roundG(ml)} ml`);
+/* An ingredient amount in the chosen units, or null to show it as written (already in those units, or no way to convert). */
+function convertAmount(q, unit, item, mode = S.units) {
+  const u = String(unit || "").toLowerCase();
+  if (!mode || mode === "asis" || q == null || q === "") return null;
+  const isVol = u === "stick" || VOL[u] != null, isWt = WT[u] != null;
+  if (!isVol && !isWt) return null; // eggs, pinches and the like
+  if (mode === "us" ? US_UNITS.includes(u) : METRIC_UNITS.includes(u)) return null;
+  const d = densityOf(keyOf(item)), tsp = u === "stick" ? q * 24 : isVol ? q * VOL[u] : null, g0 = isWt ? q * WT[u] : null;
+  if (mode === "metric") {
+    const liquid = /extract|vanilla|milk|water|cream(?! cheese)|oil|juice|liqueur|brandy|rum|bourbon|coffee(?! powder)/.test(keyOf(item));
+    return metricText(g0 != null ? g0 : (!liquid && d) ? tsp / 48 * d : null, tsp != null ? tsp / VOL.ml : 0); // liquids in ml, the rest weighed
+  }
+  const v = tsp != null ? tsp : d ? g0 / d * 48 : null; // US
+  if (v != null) return fmtVol(v) + (/butter/.test(keyOf(item)) && !/peanut|nut butter|almond butter/.test(keyOf(item)) && v >= 12 ? ` (${frac(v / 24)} stick${v / 24 > 1.06 ? "s" : ""})` : "");
+  return g0 >= 453.6 ? `${frac(g0 / 453.6)} lb` : `${frac(g0 / 28.35)} oz`;
+}
+/* The whole amount text for one ingredient line: converted if possible, else as written. */
+const ingAmount = (q, unit, item) => q == null ? "" : (convertAmount(q, unit, item) || `${qtyText(q, unit)} ${unitText(unit, q)}`.trim());
 function addAmount(acc, qty, unit) {
   const u = String(unit || "").toLowerCase();
   if (u === "stick") acc.vol += qty * 24; else if (VOL[u]) acc.vol += qty * VOL[u]; else if (WT[u]) acc.wt += qty * WT[u]; else if (u === "pinch") acc.pinch += qty; else acc.each += qty;
 }
-function amountText(a) {
+function amountText(a, key) {
+  if (S.units === "metric") {
+    const d = key ? densityOf(key) : 0, parts = [];
+    if (d && (a.vol > 0.05 || a.wt > 0.5)) parts.push(metricText(a.wt + a.vol / 48 * d, 0));
+    else { if (a.wt > 0.5) parts.push(metricText(a.wt, 0)); if (a.vol > 0.05) parts.push(metricText(null, a.vol / VOL.ml)); }
+    if (a.each > 0.01) parts.push(frac(a.each));
+    if (a.pinch > 0.01) parts.push(`${frac(a.pinch)} pinch`);
+    return parts.join(" + ");
+  }
   const parts = [];
   if (a.vol > 0.05) parts.push(fmtVol(a.vol));
   if (a.wt > 0.5) parts.push(fmtWt(a.wt) + (a.wt >= 113 && a.wt < 1000 ? ` (${Math.round(a.wt / 28.35)} oz)` : ""));
@@ -503,10 +552,11 @@ function amountText(a) {
   return parts.join(" + ");
 }
 function buyHint(key, a) {
+  if (S.units === "metric") { if (/butter/.test(key) && a.vol) return `${frac(a.vol / 24)} sticks`; return a.each % 1 > 0.01 ? `buy ${Math.ceil(a.each)}` : (a.vol >= 12 ? fmtVol(a.vol) : ""); }
   if (/butter/.test(key) && a.vol) return `${frac(a.vol / 24)} sticks`;
   if (a.each % 1 > 0.01) return `buy ${Math.ceil(a.each)}`;
   const d = densityOf(key);
-  if (d && a.vol >= 12) { const g = a.vol / 48 * d + a.wt; return g >= 225 ? `≈ ${(g / 453.6).toFixed(1)} lb` : `≈ ${Math.round(g)} g`; }
+  if (d && a.vol >= 12 && /flour|sugar|chip|chocolate|chunk|oat|cocoa|nut|pecan|walnut|almond|raisin|cranberr|coconut|toffee|butterscotch/.test(key)) { const g = a.vol / 48 * d + a.wt; return g >= 225 ? `≈ ${(g / 453.6).toFixed(1)} lb` : `≈ ${Math.round(g)} g`; }
   return "";
 }
 /* Pantry entries match a shopping item by name; "flour" in the pantry also matches "all-purpose flour" on the list. */
@@ -550,16 +600,16 @@ function shopping(bakerFilter) {
     }
   }
   const list = [...map.values()].map(e => {
-    const amount = amountText(e.need) || "as needed";
+    const amount = amountText(e.need, e.key) || "as needed";
     const have = pantryFor(e.key);
     let buy = e.need, status = "buy", haveText = "", comparable = false;
     if (have) {
       ({ buy, comparable } = subtractPantry(e.key, e.need, have));
-      haveText = amountText(have);
+      haveText = amountText(have, e.key);
       if (!comparable) status = "check";
-      else status = amountText(buy) ? "partial" : "covered";
+      else status = amountText(buy, e.key) ? "partial" : "covered";
     }
-    const buyText = amountText(buy) || (e.asNeeded && !have ? "as needed" : "");
+    const buyText = amountText(buy, e.key) || (e.asNeeded && !have ? "as needed" : "");
     return { ...e, amount, have: !!have, haveText, status, buyText, hint: status === "covered" ? "" : buyHint(e.key, buy), from: [...e.from] };
   });
   return CATS.map(c => ({ cat: c, items: list.filter(e => e.category === c && e.status !== "covered").sort((a, b) => a.item.localeCompare(b.item)) }))
@@ -624,7 +674,9 @@ function viewSettings() {
     <label class="field"><span class="label">Pantry ${help("peoplePantry", "Pantry")}</span><select id="pf-${esc(p.email)}" data-change="person-pantry" data-email="${esc(p.email)}">${S.pantries.map(x => `<option value="${esc(x.id)}" ${x.id === (p.pantry || S.pantries[0]?.id) ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select></label>
     ${p.email === S.me.email ? "<span></span>" : `<button class="btn ghost sm danger" data-act="person-del" data-email="${esc(p.email)}" style="border-color:transparent">Remove</button>`}</div>`).join("");
   const confirm = S.confirmPerson ? `<div class="confirm"><span>Remove ${esc(personName(S.confirmPerson))}? They'll be signed out and can't sign in again unless re-added.</span><button class="btn danger solid sm" data-act="person-del-yes">Remove</button><button class="btn sm" data-act="person-del-no">Keep</button></div>` : "";
-  return `<div class="page-head"><div><h1>Settings</h1><p class="muted">Signed in as ${esc(S.me.name || S.me.email)}</p></div><button class="btn" data-act="logout">Sign out</button></div>
+  const prefs = `<section class="panel"><div class="panel-head"><h2>Your preferences</h2></div>
+    <label class="field" style="max-width:320px"><span class="label">Units ${help("unitsDefault", "Default units")}</span><select id="pref-units" data-change="pref-units">${UNIT_MODES.map(([k, l]) => `<option value="${k}" ${(S.prefs?.units || "asis") === k ? "selected" : ""}>${k === "asis" ? "As written in the recipe" : k === "us" ? "US: cups and spoons" : "Metric: grams and ml"}</option>`).join("")}</select></label></section>`;
+  return `<div class="page-head"><div><h1>Settings</h1><p class="muted">Signed in as ${esc(S.me.name || S.me.email)}</p></div><button class="btn" data-act="logout">Sign out</button></div>${prefs}
     <section class="panel"><div class="panel-head"><h2>Who can sign in ${help("signIn", "Who can sign in")}</h2><span class="muted">${S.people.length} ${S.people.length === 1 ? "person" : "people"}</span></div>
       <p class="muted" style="font-size:.9rem">Anyone on this list can sign in with an emailed code. Names show up as recipe owners and bakers. Each person is linked to a pantry, and new bakes they start use it. People who share a kitchen can share a pantry. Add and rename pantries on the Shopping tab.</p>
       <div>${rows}</div>${confirm}
@@ -1002,7 +1054,7 @@ function viewDetail(r) {
   const ings = (r.ingredients || []).map(g => {
     const q = g.qty == null || g.qty === "" ? null : num(g.qty) * s;
     const odd = g.unit === "each" && q != null && q % 1 > 0.01 && /egg/i.test(g.item) ? " (whisk, then measure)" : "";
-    return `<li><span class="q">${esc(q == null ? "" : qtyText(q, g.unit) + " " + unitText(g.unit, q))}</span><span>${esc(g.item)}${g.prep ? `<span class="muted">, ${esc(g.prep)}</span>` : ""}${esc(odd)}</span></li>`;
+    return `<li><span class="q">${esc(ingAmount(q, g.unit, g.item))}</span><span>${esc(g.item)}${g.prep ? `<span class="muted">, ${esc(g.prep)}</span>` : ""}${esc(odd)}</span></li>`;
   }).join("");
   const notes = (r.notes || []).slice().reverse().map(n => S.editNote === n.id
     ? `<div class="note editing"><span class="d">${esc(noteStamp(n))}</span><textarea id="noteEdit" rows="3" aria-label="Edit note">${esc(n.text)}</textarea><div class="note-acts"><button class="btn primary sm" data-act="note-save" data-id="${esc(r.id)}" data-note="${esc(n.id)}">Save</button><button class="btn sm" data-act="note-cancel">Cancel</button></div></div>`
@@ -1015,7 +1067,7 @@ function viewDetail(r) {
       ${mainCookiePhoto(r) ? `<a class="hero" href="/api/images/${esc(mainCookiePhoto(r).id)}" target="_blank" rel="noopener"><img alt="${esc(r.name)}" src="${esc(imgSrc(mainCookiePhoto(r)))}"></a>` : ""}
       ${viewOrigin(r)}
       <div class="scale-box"><span class="label">Batch ${help("batch", "Batch")}</span>${scaleControl(r)}<span class="out">${r.yieldCount ? `${Math.round(num(r.yieldCount) * s)} cookies` : ""}</span><button class="toggle" data-act="toggle" data-id="${esc(r.id)}" aria-pressed="${on}" style="margin-left:auto">${on ? "✓ On the bake plan" : "+ Add to bake plan"}</button></div>
-      <div class="two"><div><span class="label">Ingredients${s !== 1 ? ` · scaled ${scaleLabel(s)}` : ""}</span><ul class="ing" style="margin-top:6px">${ings || `<li><span></span><span class="muted">No ingredients yet</span></li>`}</ul></div>
+      <div class="two"><div><div class="ing-head"><span class="label">Ingredients${s !== 1 ? ` · scaled ${scaleLabel(s)}` : ""}</span>${unitToggle()}</div><ul class="ing" style="margin-top:6px">${ings || `<li><span></span><span class="muted">No ingredients yet</span></li>`}</ul></div>
       <div style="display:flex;flex-direction:column;gap:12px"><div><span class="label">Notes for next time ${help("notes", "Notes")}</span><div class="notes" style="margin-top:6px">${notes || `<p class="muted" style="font-size:.9rem">Nothing yet. Jot down what you'd change: bake a minute less, double the chips, chill overnight.</p>`}</div></div>
         <div class="field"><label class="label" for="noteDraft">Add a note</label><textarea id="noteDraft" rows="3" placeholder="e.g. Pulled at 10 min on the dark pans and they were perfect"></textarea><button class="btn" data-act="add-note" data-id="${esc(r.id)}" style="align-self:flex-start">Save note</button></div>
         ${r.makeAheadTip || num(r.doughKeepsDays) || r.freezable ? `<div><span class="label">Make ahead</span><p style="margin-top:4px;font-size:.92rem">${num(r.doughKeepsDays) ? `Dough keeps ${esc(r.doughKeepsDays)} day${num(r.doughKeepsDays) > 1 ? "s" : ""} in the fridge. ` : ""}${r.freezable ? "Freezes well. " : ""}${esc(r.makeAheadTip || "")}</p></div>` : ""}
@@ -1257,7 +1309,7 @@ function printRecipe(r) {
   const s = scaleOf(r.id), src = safeUrl(r.link) || safeUrl(r.source), from = safeUrl(r.source) || /^photo$/i.test(r.source || "") ? "" : (r.source || "");
   const times = [["Prep", r.prepMinutes], ["Chill", r.chillMinutes], ["Bake", r.bakeMinutes], ["Cool", r.coolMinutes]].filter(x => num(x[1])).map(([k, v]) => `${k} ${fmtDur(num(v))}`);
   const meta = [r.yieldCount ? `Makes ${Math.round(num(r.yieldCount) * s)} cookies${s !== 1 ? ` (${scaleLabel(s)} batch)` : ""}` : (s !== 1 ? `${scaleLabel(s)} batch` : ""), r.ovenTempF ? `${r.ovenTempF}°F` : "", ...times, r.cookiesPerSheet ? `${r.cookiesPerSheet} per sheet` : ""].filter(Boolean).join(" · ");
-  const ings = (r.ingredients || []).map(g => { const q = g.qty == null || g.qty === "" ? null : num(g.qty) * s; return `<li><span class="q">${esc(q == null ? "" : qtyText(q, g.unit) + " " + unitText(g.unit, q))}</span><span>${esc(g.item)}${g.prep ? `, ${esc(g.prep)}` : ""}</span></li>`; }).join("");
+  const ings = (r.ingredients || []).map(g => { const q = g.qty == null || g.qty === "" ? null : num(g.qty) * s; return `<li><span class="q">${esc(ingAmount(q, g.unit, g.item))}</span><span>${esc(g.item)}${g.prep ? `, ${esc(g.prep)}` : ""}</span></li>`; }).join("");
   const ahead = [num(r.doughKeepsDays) ? `Dough keeps ${r.doughKeepsDays} day${num(r.doughKeepsDays) > 1 ? "s" : ""} in the fridge.` : "", r.freezable ? "Freezes well." : "", r.makeAheadTip || ""].filter(Boolean).join(" ");
   const notes = (r.notes || []).slice().reverse().map(n => `<div class="note">${esc(n.text)}<small>${esc(noteStamp(n))}</small></div>`).join("");
   const pic = mainCookiePhoto(r);
@@ -1361,6 +1413,7 @@ document.addEventListener("click", async e => {
   else if (a === "print-page") runPrint("printing-page", S.tab === "shopping" ? `${S.plan.name || "Shopping"} shopping list` : S.plan.name || "Bake plan");
   else if (a === "sugg-move") moveCookie(id, el.dataset.to, el.dataset.mix === "1");
   else if (a === "sugg-eve") { const v = S.plan.selections?.[id]; if (v) { v.mix = "eve"; savePlan(); toast("Set to mix the night before"); } }
+  else if (a === "units") { S.units = el.dataset.mode; S.unitsTouched = true; render(); renderModal(); }
   else if (a === "dupe-add") { S.modal.dupeOk = true; S.modal.dupeAsk = null; saveDraft($('[data-act="ed-save"]')); }
   else if (a === "dupe-filter") { S.dupeFilter = !S.dupeFilter; render(); }
   else if (a === "not-dupe") {
@@ -1426,6 +1479,7 @@ document.addEventListener("change", e => {
     const v = P.selections?.[el.dataset.id]; if (v) { v.mixOnly = el.value === "mixonly"; v.mix = el.value === "mixonly" ? "" : el.value; savePlan(); }
   }
   else if (c === "sel-move") { const [to, mix] = el.value.split("|"); if (to) moveCookie(el.dataset.id, to, mix === "1"); }
+  else if (c === "pref-units") { S.prefs = { ...(S.prefs || {}), units: el.value }; S.units = el.value; S.unitsTouched = false; api("PATCH", "/api/me/prefs", { units: el.value }).then(() => toast("Saved. Recipes now start in these units.")).catch(writeErr); render(); }
   else if (c === "baker-filter") { S.bakerFilter = el.value; if (!el.value) S.hideOthers = false; render(); }
   else if (c === "hide-others") { S.hideOthers = el.checked; render(); }
   else if (c === "shop-filter") { S.shopFilter = el.value; render(); }

@@ -162,7 +162,15 @@ if (!db.prepare("SELECT 1 FROM bakes LIMIT 1").get()) {
 }
 
 app.get("/api/state", (req, res) => {
-  res.json({ me: people().find((p) => p.email === req.email), people: people(), recipes: allRecipes(), ...bakeState(req.email), pantries: getPantries() });
+  res.json({ me: people().find((p) => p.email === req.email), prefs: getKV("prefs", {})[req.email] || {}, people: people(), recipes: allRecipes(), ...bakeState(req.email), pantries: getPantries() });
+});
+
+/* Each person's own settings, e.g. which units recipes show in. */
+app.patch("/api/me/prefs", (req, res) => {
+  const all = getKV("prefs", {}), mine = { ...(all[req.email] || {}) };
+  if (req.body?.units !== undefined) mine.units = ["asis", "us", "metric"].includes(req.body.units) ? req.body.units : "asis";
+  all[req.email] = mine; setKV("prefs", all);
+  res.json({ prefs: mine });
 });
 
 /* ---------- pantries: one per kitchen; people and bakes each point at one ---------- */
