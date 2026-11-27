@@ -436,6 +436,24 @@ app.get("/api/images/:imgId", (req, res) => {
   res.sendFile(imagePath(row.id, thumb));
 });
 
+/* Use the recipe website's own photo as the cookie photo, when the recipe has a link and no cookie photo yet. */
+app.post("/api/recipes/:id/site-photo", wrap(async (req, res) => {
+  const row = db.prepare("SELECT data FROM recipes WHERE id = ?").get(req.params.id);
+  if (!row) return res.status(404).json({ error: "That recipe was deleted." });
+  const r = JSON.parse(row.data), link = r.link || (/^https?:\/\//i.test(r.source || "") ? r.source : "");
+  const done = (reason, added = false) => res.json({ added, reason, images: recipeImages(req.params.id) });
+  if (!link) return done("no link");
+  if (db.prepare("SELECT 1 FROM recipe_images WHERE recipe_id = ? AND kind = 'cookie'").get(req.params.id)) return done("already has a cookie photo");
+  if (limit(`sitephoto:${req.email}`, 60, 3600_000)) return done("busy");
+  const page = await fetchRecipePage(link).catch(() => null);
+  const img = page?.imageUrl ? await fetchRecipeImage(page.imageUrl) : null;
+  if (!img) return done("the website has no photo we could use");
+  const buf = Buffer.from(img.data, "base64"), imgId = crypto.randomUUID();
+  fs.writeFileSync(imagePath(imgId), buf);
+  db.prepare("INSERT INTO recipe_images (id, recipe_id, type, size, page, created_at, kind) VALUES (?, ?, ?, ?, ?, ?, 'cookie')").run(imgId, req.params.id, img.media_type, buf.length, 0, new Date().toISOString());
+  done("", true);
+}));
+
 /* Make a cookie photo the main one: it moves to the front, so it's the one on the card and the printout. */
 app.post("/api/images/:imgId/main", (req, res) => {
   const row = db.prepare("SELECT recipe_id, kind FROM recipe_images WHERE id = ?").get(req.params.imgId);

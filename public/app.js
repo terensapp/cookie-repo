@@ -992,6 +992,7 @@ function viewPhotoSet(r, kind) {
   return `<div><span class="label">${cookie ? "Cookie photos" : "Original photos"} ${help(cookie ? "cookiePhotos" : "photos", cookie ? "Cookie photos" : "Original photos")}</span>
     ${imgs.length ? `<div class="thumbs" style="margin-top:8px">${items}</div>` : `<p class="muted" style="font-size:.9rem;margin-top:4px">${cookie ? "No cookie photos yet. Add a picture of how they turned out; the main one goes on the recipe card." : "No photos yet. Keep a picture of the recipe card or page here."}</p>`}
     ${confirm}
+    ${cookie && S.sitePhotoBusy === r.id ? `<div class="status" style="margin-top:8px"><div class="spin"></div><span>Getting the photo from the website…</span></div>` : ""}
     ${up ? `<div class="status" style="margin-top:8px"><div class="spin"></div><span>Saving photo ${Math.min(up.done + 1, up.total)} of ${up.total}…</span></div>`
       : `<div style="margin-top:8px"><label class="btn sm" for="${esc(inputId)}" style="cursor:pointer">+ Add ${cookie ? "cookie " : ""}photos</label><input id="${esc(inputId)}" data-addphoto="${esc(r.id)}" data-kind="${kind}" type="file" accept="image/*" multiple hidden></div>`}</div>`;
 }
@@ -1170,9 +1171,26 @@ async function saveDraft(btn) {
   openModal({ type: "detail", id: rec.id });
   if (photos.length) await uploadPhotos(rec.id, photos.map(p => p.file));
   photos.forEach(p => URL.revokeObjectURL(p.url));
+  if (!d.cookieCrop && rec.link && rec.link !== (old?.link || "") && !mainCookiePhoto(getR(rec.id) || {})) fetchSitePhoto(rec.id);
   if (d.cookieCrop) { if (d.useCrop) await uploadPhotos(rec.id, [new File([d.cookieCrop.blob], `cookie.${(d.cookieCrop.blob.type.split("/")[1] || "jpg").replace("jpeg", "jpg")}`, { type: d.cookieCrop.blob.type || "image/jpeg" })], "cookie"); URL.revokeObjectURL(d.cookieCrop.url); }
 }
 
+/* After a link is added to a recipe with no cookie photo, bring in the website's photo (and make its small preview). */
+async function fetchSitePhoto(recipeId) {
+  S.sitePhotoBusy = recipeId; if (S.modal?.type === "detail") renderModal();
+  try {
+    const d = await api("POST", `/api/recipes/${encodeURIComponent(recipeId)}/site-photo`);
+    const r = getR(recipeId); if (r) r.images = d.images;
+    if (d.added) {
+      toast("Added the website's photo as the cookie photo");
+      const im = mainCookiePhoto(r || { images: d.images });
+      const blob = im && await fetch(`/api/images/${encodeURIComponent(im.id)}`).then(x => x.ok ? x.blob() : null).catch(() => null);
+      const thumb = blob && await shrinkToBlob(blob, 1100);
+      if (thumb) { const t = await fetch(`/api/images/${im.id}/thumb`, { method: "PUT", body: thumb, headers: { "Content-Type": "image/jpeg" } }); if (t.ok && r) r.images = (await t.json()).images; }
+    }
+  } catch { /* no photo is fine */ }
+  S.sitePhotoBusy = null; render(); if (S.modal?.type === "detail") renderModal();
+}
 /* The photo a recipe website shows for the recipe, offered as the cookie photo. */
 function attachSitePhoto(draft, p) {
   try {
@@ -1456,7 +1474,7 @@ document.addEventListener("submit", async e => {
   else if (form === "link") {
     const r = getR(e.target.dataset.id), raw = $("#link-input").value.trim(), link = raw ? fixLink(raw) : "";
     if (raw && !link) { toast("Enter the full web address, starting with https://"); return; }
-    if (r) { const rec = clone(r); rec.link = link; if (await saveRecipe(rec)) { S.editLink = null; toast(link ? "Link saved" : "Link removed"); renderModal(); } }
+    if (r) { const rec = clone(r); rec.link = link; if (await saveRecipe(rec)) { S.editLink = null; toast(link ? "Link saved" : "Link removed"); renderModal(); if (link && !mainCookiePhoto(getR(rec.id) || rec)) fetchSitePhoto(rec.id); } }
   }
   else if (form === "bake") {
     const f = S.bakeForm; if (!f) return;
