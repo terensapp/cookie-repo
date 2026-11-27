@@ -142,7 +142,7 @@ function bakeList() {
     const bakers = [...new Set(Object.values(b.selections || {}).map((v) => v?.baker).filter(Boolean))];
     // Selections ride along so a shopping list can combine several bakes.
     const selections = Object.fromEntries(Object.entries(b.selections || {}).map(([id, v]) => [id, { scale: v?.scale, baker: v?.baker || "", name: v?.name || names.get(id) || "" }]));
-    return { id: b.id, name: b.name, bakeDate: b.bakeDate, partOf: b.partOf || "", pantryId: b.pantryId, usePantry: b.usePantry, cookies, bakers, selections, createdAt: row.created_at };
+    return { id: b.id, name: b.name, bakeDate: b.bakeDate, partOf: b.partOf || "", pantryId: b.pantryId, usePantry: b.usePantry, mixOnly: !!b.mixOnly, cookies, bakers, selections, createdAt: row.created_at };
   }).sort((a, b) => String(b.bakeDate).localeCompare(String(a.bakeDate)) || String(b.createdAt).localeCompare(String(a.createdAt)));
 }
 /* The bake a person has open; new people land on the most recent one. */
@@ -239,6 +239,7 @@ function cleanBake(body, id) {
   b.shopScope = ["this", "pantry", "event", "custom"].includes(b.shopScope) ? b.shopScope : "this";
   b.shopBakes = Array.isArray(b.shopBakes) ? b.shopBakes.filter((x) => typeof x === "string" && ID_RE.test(x)).slice(0, 50) : [];
   b.usePantry = b.usePantry !== false;
+  b.mixOnly = !!(b.mixOnly && b.partOf); // only a prebake can hand its doughs to the main bake
   // Which pantry this bake's shopping list subtracts. "" = none; missing = the first pantry (bakes from before).
   if (b.pantryId !== undefined) b.pantryId = typeof b.pantryId === "string" && getPantries().some((p) => p.id === b.pantryId) ? b.pantryId : "";
   return b;
