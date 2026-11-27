@@ -366,10 +366,11 @@ function schedule(P = S.plan) {
     return { r, scale, baker, fromBake, mixOnly: !!mixHere, color: (i % 6) + 1, count, per, sheets: Math.ceil(count / per), prep, chill, keeps, freezable: !!r.freezable, temp: num(r.ovenTempF) || 350, bake: num(r.bakeMinutes) || 11, cool: num(r.coolMinutes) || 10, deco: num(r.decorateMinutes), ahead, lastOut: 0, firstIn: null };
   });
   const before = items.filter(it => it.ahead);
-  const today = items.filter(it => !it.ahead).sort((a, b) => b.chill - a.chill || a.temp - b.temp);
-  let t = T0;
-  for (const it of today) { it.mixStart = t; it.mixEnd = t + it.prep; t = it.mixEnd; it.ready = it.mixEnd + it.chill; }
-  for (const it of before) it.ready = T0;
+  // Mixing order decides when each dough is ready, which decides oven temperatures. Several orders are tried below.
+  const todayBase = items.filter(it => !it.ahead);
+  let today = todayBase;
+  const mixIn = order => { let t = T0; today = [...todayBase].sort(order); for (const it of today) { it.mixStart = t; it.mixEnd = t + it.prep; t = it.mixEnd; it.ready = it.mixEnd + it.chill; } for (const it of before) it.ready = T0; };
+  mixIn((a, b) => b.chill - a.chill || a.temp - b.temp);
   const days = main ? daysBetween(P.bakeDate, main.bakeDate) : 0;
   const stored = items.filter(it => it.mixOnly); // mixed here, baked at the main bake
   for (const it of stored) it.store = doughStorage(it, days);
@@ -379,29 +380,57 @@ function schedule(P = S.plan) {
   }
   for (const it of items) if (it.fromBake) it.store = doughStorage(it, daysBetween(it.fromBake.bakeDate, P.bakeDate));
   const baked = items.filter(it => !it.mixOnly);
-  const rem = []; baked.forEach(it => { for (let k = 0; k < it.sheets; k++) rem.push({ it }); });
-  const ovens = Array.from({ length: nOv }, (_, i) => ({ i, free: T0 + PRE, temp: null }));
-  const rounds = [], ovenEvents = []; let guard = 0;
-  while (rem.length && guard++ < 600) {
-    const o = ovens.reduce((a, b) => b.free < a.free ? b : a);
-    let tt = o.free, ready = rem.filter(s => s.it.ready <= tt);
-    if (!ready.length) { tt = Math.min(...rem.map(s => s.it.ready)); ready = rem.filter(s => s.it.ready <= tt); }
-    const temp = (o.temp != null && ready.some(s => s.it.temp === o.temp)) ? o.temp : Math.min(...ready.map(s => s.it.temp));
-    if (o.temp == null) ovenEvents.push({ oven: o.i, kind: "preheat", start: tt - PRE, end: tt, temp });
-    else if (temp !== o.temp) { const adj = temp > o.temp ? 10 : 20; ovenEvents.push({ oven: o.i, kind: "adjust", start: tt, end: tt + adj, from: o.temp, temp }); tt += adj; }
-    const pick = ready.filter(s => s.it.temp === temp).sort((a, b) => a.it.ready - b.it.ready || items.indexOf(a.it) - items.indexOf(b.it)).slice(0, cap);
-    const dur = Math.max(...pick.map(s => s.it.bake));
-    const g = new Map(); pick.forEach(s => g.set(s.it, (g.get(s.it) || 0) + 1));
-    rounds.push({ oven: o.i, start: tt, end: tt + dur, temp, groups: [...g].map(([it, n]) => ({ it, n })) });
-    for (const s of pick) { rem.splice(rem.indexOf(s), 1); s.it.lastOut = Math.max(s.it.lastOut, tt + s.it.bake); if (s.it.firstIn == null) s.it.firstIn = tt; }
-    o.free = tt + dur + 3; o.temp = temp;
+  /* Oven plan. Turning an oven up is quick; cooling one down is slow, so lower temperatures go first, and an oven
+     will sit idle for a while for a lower-temperature dough that's almost ready rather than go hot and cool later. */
+  const upMin = d => Math.max(5, Math.round(d / 5)), downMin = d => Math.max(10, Math.round(d * 0.4));
+  const COOL_COST = 45; // a cool-down is a hassle (door open, waiting, guessing), so only accept one if it saves more than this
+  function bakeOff(waitMax) {
+    for (const it of baked) { it.lastOut = 0; it.firstIn = null; }
+    const rem = []; baked.forEach(it => { for (let k = 0; k < it.sheets; k++) rem.push({ it }); });
+    const ovens = Array.from({ length: nOv }, (_, i) => ({ i, free: T0 + PRE, temp: null }));
+    const rounds = [], ovenEvents = []; let guard = 0;
+    const pickTemp = (o, ready) => { const low = Math.min(...ready.map(s => s.it.temp)); return o.temp != null && ready.some(s => s.it.temp === o.temp) && o.temp <= low ? o.temp : (o.temp != null && ready.some(s => s.it.temp === o.temp) && !rem.some(s => s.it.temp < o.temp) ? o.temp : low); };
+    while (rem.length && guard++ < 800) {
+      const o = ovens.reduce((a, b) => b.free < a.free ? b : a);
+      let tt = o.free, ready = rem.filter(s => s.it.ready <= tt);
+      if (!ready.length) { tt = Math.min(...rem.map(s => s.it.ready)); ready = rem.filter(s => s.it.ready <= tt); }
+      let temp = pickTemp(o, ready);
+      const lower = rem.filter(s => s.it.temp < temp && s.it.ready > tt);
+      if (lower.length && waitMax > 0) { const soon = Math.min(...lower.map(s => s.it.ready)); if (soon - tt <= waitMax) { tt = soon; ready = rem.filter(s => s.it.ready <= tt); temp = pickTemp(o, ready); } }
+      if (o.temp == null) ovenEvents.push({ oven: o.i, kind: "preheat", start: tt - PRE, end: tt, temp });
+      else if (temp !== o.temp) {
+        const down = temp < o.temp, adj = down ? downMin(o.temp - temp) : upMin(temp - o.temp);
+        ovenEvents.push({ oven: o.i, kind: "adjust", start: tt, end: tt + adj, from: o.temp, temp }); tt += adj;
+      }
+      const pick = ready.filter(s => s.it.temp === temp).sort((a, b) => a.it.ready - b.it.ready || items.indexOf(a.it) - items.indexOf(b.it)).slice(0, cap);
+      const dur = Math.max(...pick.map(s => s.it.bake));
+      const g = new Map(); pick.forEach(s => g.set(s.it, (g.get(s.it) || 0) + 1));
+      rounds.push({ oven: o.i, start: tt, end: tt + dur, temp, groups: [...g].map(([it, n]) => ({ it, n })) });
+      // A cool-down just before this round: the reason is the latest-ready dough going in now.
+      const prev = ovenEvents[ovenEvents.length - 1];
+      if (prev && prev.oven === o.i && prev.kind === "adjust" && prev.temp < prev.from && prev.end === tt && !prev.cause) prev.cause = [...g.keys()].sort((a, b) => b.ready - a.ready)[0];
+      for (const s of pick) { rem.splice(rem.indexOf(s), 1); s.it.lastOut = Math.max(s.it.lastOut, tt + s.it.bake); if (s.it.firstIn == null) s.it.firstIn = tt; }
+      o.free = tt + dur + 3; o.temp = temp;
+    }
+    const cools = ovenEvents.filter(e => e.kind === "adjust" && e.temp < e.from).length, heats = ovenEvents.filter(e => e.kind === "adjust" && e.temp > e.from).length;
+    const last = Math.max(T0, ...baked.map(it => it.lastOut + it.cool + (it.deco || 0)), ...items.map(it => it.mixEnd || T0));
+    return { rounds, ovenEvents, cools, heats, score: last + cools * COOL_COST + heats * 3 };
   }
+  const ORDERS = [
+    (a, b) => b.chill - a.chill || a.temp - b.temp,                                  // longest chill first
+    (a, b) => a.temp - b.temp || b.chill - a.chill,                                  // lowest oven temperature first
+    (a, b) => (b.chill >= 60) - (a.chill >= 60) || a.temp - b.temp || b.chill - a.chill, // long chills first, then by temperature
+  ];
+  let best = null;
+  for (const [oi, order] of ORDERS.entries()) { mixIn(order); for (const w of [0, 25, 60]) { const r = bakeOff(w); if (!best || r.score < best.score) best = { ...r, oi, w }; } }
+  mixIn(ORDERS[best.oi]);
+  const { rounds, ovenEvents, cools, heats } = bakeOff(best.w);
   let end = Math.max(T0, ...rounds.map(r => r.end));
   for (const it of baked) { it.coolEnd = it.lastOut + it.cool; it.decoEnd = it.coolEnd + (it.deco || 0); end = Math.max(end, it.decoEnd); }
   for (const it of stored) end = Math.max(end, it.mixEnd);
   const temps = [...new Set(baked.map(i => i.temp))].sort((a, b) => a - b).map(tp => ({ temp: tp, items: baked.filter(i => i.temp === tp) }));
   const sheets = baked.reduce((a, i) => a + i.sheets, 0);
-  return { items, before, today, rounds, ovenEvents, temps, T0, end, nOv, cap, PRE, sheets, stored, main, days };
+  return { items, before, today, rounds, ovenEvents, temps, T0, end, nOv, cap, PRE, sheets, stored, main, days, cools, heats };
 }
 
 /* ---------- shopping ---------- */
@@ -732,6 +761,11 @@ function viewPlan() {
     return `<div class="tempgroup"><span class="deg">${g.temp}°F</span><p>${msg}</p></div>`;
   }).join("");
   if (sc.temps.length > 1) share += `<p class="muted" style="font-size:.85rem">Different temperatures bake one after another, lowest first, since an oven heats up faster than it cools down.${sc.nOv > 1 ? " With more than one oven, they can run at the same time." : ""}</p>`;
+  // What the oven has to do: one preheat per oven, plus any turn-ups and (slow) cool-downs, and why a cool-down couldn't be avoided.
+  const downs = sc.ovenEvents.filter(e => e.kind === "adjust" && e.temp < e.from);
+  const changes = [`preheat${sc.nOv > 1 ? ` ${sc.nOv} ovens` : " once"}`, sc.heats ? `turn up ${sc.heats} time${sc.heats > 1 ? "s" : ""}` : "", sc.cools ? `cool down ${sc.cools} time${sc.cools > 1 ? "s" : ""}` : "no cool-downs"].filter(Boolean).join(", ");
+  share += `<p style="font-size:.88rem"><b>Oven changes:</b> ${changes}.</p>`;
+  share += downs.map(e => { const c = e.cause; const why = c ? (c.fromBake || c.ahead ? `${esc(c.r.name)} comes off the plan later` : c.chill ? `${esc(c.r.name)} needs ${fmtDur(c.chill)} of chilling, so it isn't ready until ${fmtT(c.ready)}` : `${esc(c.r.name)} is mixed later in the morning`) : "a lower-temperature dough isn't ready earlier"; return `<p class="muted" style="font-size:.85rem">At ${fmtT(e.start)}${sc.nOv > 1 ? ` oven ${e.oven + 1}` : ""} cools from ${e.from}°F to ${e.temp}°F (about ${fmtDur(e.end - e.start)}) because ${why}.${c && !c.ahead && !c.fromBake ? " Mixing it the night before would avoid that." : ""}</p>`; }).join("");
   share += `</section>`;
 
   // reminders
