@@ -278,6 +278,23 @@ app.post("/api/bakes", (req, res) => {
   res.json(bakeState(req.email));
 });
 
+/* Move one cookie (batch size, baker and mixing choice) to another bake in the same event. */
+app.post("/api/bakes/:id/move", (req, res) => {
+  const from = getBake(req.params.id), to = getBake(String(req.body?.to || "")), rid = String(req.body?.recipeId || "");
+  if (!from || !to) return res.status(404).json({ error: "That bake was deleted." });
+  const v = from.selections?.[rid];
+  if (!v) return res.status(404).json({ error: "That cookie isn't on this bake any more." });
+  const event = (b) => b.partOf || b.id;
+  if (event(from) !== event(to) || from.id === to.id) return res.status(400).json({ error: "Cookies can only move between a main bake and its prebakes." });
+  const moved = { ...v, mixOnly: to.partOf ? !!req.body?.mixOnly : false };
+  if (!to.partOf || moved.mixOnly) delete moved.mix;
+  const there = to.selections?.[rid];
+  to.selections = { ...(to.selections || {}), [rid]: there ? { ...there, scale: (Number(there.scale) || 1) + (Number(v.scale) || 1) } : moved };
+  delete from.selections[rid];
+  putBake(from); putBake(to);
+  res.json({ ...bakeState(req.email), merged: !!there });
+});
+
 app.post("/api/bakes/:id/open", (req, res) => {
   if (!getBake(req.params.id)) return res.status(404).json({ error: "That bake was deleted." });
   setKV(`open:${req.email}`, req.params.id);

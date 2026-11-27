@@ -266,6 +266,12 @@ main{padding-block:24px 64px;display:flex;flex-direction:column;gap:20px}
   body.printing-page .task{break-inside:avoid}
   body.printing-page select{appearance:none;-webkit-appearance:none;border:0;background:none;padding:0;font-weight:600}
 }
+.sugg{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px 14px;align-items:center;padding:10px 0;border-top:1px solid var(--line)}
+.sugg .nm{font-weight:700}
+.sugg .sub{font-size:.86rem}
+.sugg-acts{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+.move-sel{max-width:170px}
+@media (max-width:640px){.sugg{grid-template-columns:1fr}.sugg-acts{justify-content:flex-start}}
 .photo-btns{display:flex;gap:8px;flex-wrap:wrap}
 .photo-btns label.btn{cursor:pointer}
 .status{display:flex;gap:10px;align-items:center;font-size:.9rem;padding:10px 12px;border-radius:8px;background:var(--surface-2)}
