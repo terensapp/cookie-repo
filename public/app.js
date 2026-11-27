@@ -591,8 +591,8 @@ function viewPlan() {
   const optional = sc.items.filter(it => !it.ahead && (it.keeps >= 1 || it.freezable));
   let ahead = `<section class="panel"><div class="panel-head"><h2>Make ahead</h2><span class="muted">${esc(fmtDay(eve))}</span></div>`;
   if (sc.before.length) {
-    ahead += sc.before.filter(it => it.fromBake).map(it => `<div class="task"><span class="when">${it.store.how === "freezer" ? "Evening" : "Ready"}</span><p><b>${esc(it.r.name)} dough</b> comes from ${esc(it.fromBake.name)} (${esc(fmtDay(parseDate(it.fromBake.bakeDate)))}).</p><span class="sub">${it.store.how === "freezer" ? "It was frozen: move it to the fridge tonight to thaw." : esc(it.store.text)}</span></div>`).join("");
-    ahead += sc.before.filter(it => !it.fromBake).map(it => `<div class="task"><span class="when">Evening</span><p><b>Mix ${esc(it.r.name)} dough</b> (${fmtDur(it.prep)}), wrap and refrigerate.</p><span class="sub">${it.ahead === "required" ? `Needs ${fmtDur(it.chill)} of chilling, so it can't be done the same morning.` : `Dough keeps ${it.keeps} day${it.keeps > 1 ? "s" : ""}; mixing tonight frees up the morning.`}${it.r.makeAheadTip ? " " + esc(it.r.makeAheadTip) : ""}</span></div>`).join("");
+    ahead += sc.before.filter(it => it.fromBake).map(it => `<div class="task"><span class="when">${it.store.how === "freezer" ? "Evening" : "Ready"}</span><p><b>${esc(it.r.name)} dough</b> comes from ${esc(it.fromBake.name)} (${esc(fmtDay(parseDate(it.fromBake.bakeDate)))}).${bakerTag(it)}</p><span class="sub">${it.store.how === "freezer" ? "It was frozen: move it to the fridge tonight to thaw." : esc(it.store.text)}</span></div>`).join("");
+    ahead += sc.before.filter(it => !it.fromBake).map(it => `<div class="task"><span class="when">Evening</span><p><b>Mix ${esc(it.r.name)} dough</b> (${fmtDur(it.prep)}), wrap and refrigerate.${bakerTag(it)}</p><span class="sub">${it.ahead === "required" ? `Needs ${fmtDur(it.chill)} of chilling, so it can't be done the same morning.` : `Dough keeps ${it.keeps} day${it.keeps > 1 ? "s" : ""}; mixing tonight frees up the morning.`}${it.r.makeAheadTip ? " " + esc(it.r.makeAheadTip) : ""}</span></div>`).join("");
     const tonight = sc.before.filter(i => !i.fromBake).reduce((a, i) => a + i.prep, 0);
     if (tonight) ahead += `<p class="muted" style="font-size:.85rem">About ${fmtDur(tonight)} of mixing tonight.</p>`;
   } else ahead += `<p class="muted">Nothing has to happen the day before. Every dough can be mixed on bake day.</p>`;
@@ -617,11 +617,29 @@ function viewPlan() {
   if (sc.mixOnly) {
     const store = `<section class="panel"><div class="panel-head"><h2>Storing the dough</h2><span class="muted">until ${esc(fmtDay(parseDate(sc.main.bakeDate)))}</span></div>
       <p class="muted" style="font-size:.88rem">These doughs bake on ${esc(sc.main.name)} day, ${sc.days} day${sc.days === 1 ? "" : "s"} after mixing, and show up on its schedule.</p>
-      ${sc.items.map(it => `<div class="task ${it.store.how === "warn" ? "warn" : ""}"><span class="when">${it.store.how === "freezer" ? "Freeze" : it.store.how === "warn" ? "Check" : "Fridge"}</span><p><b>${esc(it.r.name)}</b></p><span class="sub">${esc(it.store.text)}</span></div>`).join("")}
+      ${sc.items.map(it => `<div class="task ${it.store.how === "warn" ? "warn" : ""}"><span class="when">${it.store.how === "freezer" ? "Freeze" : it.store.how === "warn" ? "Check" : "Fridge"}</span><p><b>${esc(it.r.name)}</b>${bakerTag(it)}</p><span class="sub">${esc(it.store.text)}</span></div>`).join("")}
       <button class="btn sm" data-act="bake-open" data-id="${esc(sc.main.id)}" style="align-self:flex-start">Open ${esc(sc.main.name)}</button></section>`;
     return head + tabsRow + past + settings + picked + store + reminders + viewTimeline(sc) + notes;
   }
   return head + tabsRow + past + settings + picked + `<div class="two">${ahead}${share}</div>` + reminders + viewTimeline(sc) + notes;
+}
+/* Who's doing what on the day: each baker's cookies, sheets, mixing time and busy window. */
+const bakerTag = it => it.baker ? `<span class="baker">${esc(personName(it.baker))}</span>` : "";
+function viewWho(sc, ev) {
+  const groups = new Map();
+  for (const it of sc.items) { const k = it.baker || ""; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(it); }
+  if (groups.size === 1 && groups.has("")) return `<p class="muted" style="font-size:.88rem">No bakers assigned yet. Pick a baker for each cookie above to see who does what.</p>`;
+  const rows = [...groups].sort(([a], [b]) => (a === "") - (b === "") || personName(a).localeCompare(personName(b))).map(([email, its]) => {
+    const mine = ev.filter(e => e.its.some(i => (i.baker || "") === email));
+    const start = Math.min(...mine.map(e => e.t)), end = Math.max(...its.map(i => sc.mixOnly ? i.mixEnd : (i.decoEnd ?? i.coolEnd ?? i.mixEnd)));
+    const mix = its.filter(i => i.mixStart != null).reduce((a, i) => a + i.prep, 0), sheets = its.reduce((a, i) => a + i.sheets, 0);
+    const facts = [sc.mixOnly ? "" : `${sheets} sheet${sheets === 1 ? "" : "s"}`, mix ? `${fmtDur(mix)} mixing` : "", its.some(i => i.fromBake) ? "uses prebake dough" : "", isFinite(start) && isFinite(end) ? `${fmtT(start)} – ${fmtT(end)}` : ""].filter(Boolean).join(" · ");
+    const active = S.bakerFilter === email && email;
+    return `<div class="who-row ${email ? "" : "unassigned"} ${active ? "on" : ""}"><div style="min-width:0"><div class="nm">${email ? esc(personName(email)) : "No baker yet"}</div>
+      <div class="sub">${its.map(i => `<span class="dot" style="background:var(--c${i.color})"></span>${esc(i.r.name)}`).join(" ")}</div><div class="sub">${facts}</div></div>
+      ${email ? `<button class="btn sm ${active ? "primary" : ""}" data-act="who-show" data-email="${esc(email)}">${active ? "Showing" : "Show tasks"}</button>` : `<span class="muted" style="font-size:.85rem">Assign above</span>`}</div>`;
+  }).join("");
+  return `<div class="who-box"><span class="label">Who's doing what</span>${rows}</div>`;
 }
 function viewTimeline(sc) {
   const t0 = sc.T0, t1 = Math.max(sc.end, t0 + 60), span = t1 - t0;
@@ -660,10 +678,12 @@ function viewTimeline(sc) {
   ev.push({ t: sc.end, its: [], txt: sc.mixOnly ? `<b>All doughs mixed</b>` : `<b>Everything's done</b>`, sub: "" });
   ev.sort((a, b) => a.t - b.t);
   const f = S.bakerFilter;
-  const agenda = ev.map(e => { const t = tag(e.its); const dim = f && e.its.length && !t.bakers.includes(f); return `<div class="task ${dim ? "dim" : ""}"><span class="when">${fmtT(e.t)}</span><p>${e.txt}${t.html}</p>${e.sub ? `<span class="sub">${esc(e.sub)}</span>` : ""}</div>`; }).join("");
+  const agenda = ev.map(e => { const t = tag(e.its); const dim = f && e.its.length && !t.bakers.includes(f); if (dim && S.hideOthers) return ""; return `<div class="task ${dim ? "dim" : ""}"><span class="when">${fmtT(e.t)}</span><p>${e.txt}${t.html}</p>${e.sub ? `<span class="sub">${esc(e.sub)}</span>` : ""}</div>`; }).join("");
   const bakers = [...new Set(sc.items.map(i => i.baker).filter(Boolean))];
-  const filter = bakers.length > 1 || (bakers.length === 1 && sc.items.some(i => !i.baker)) ? `<label class="who">Highlight ${personSelect("baker-filter", f, `data-change="baker-filter"`, "Highlight one baker's tasks", "Everyone")}</label>` : "";
+  const filter = bakers.length > 1 || (bakers.length === 1 && sc.items.some(i => !i.baker)) ? `<label class="who">Show ${personSelect("baker-filter", f, `data-change="baker-filter"`, "Show one baker's tasks", "Everyone")}</label>${f ? `<label class="check" style="font-size:.88rem"><input type="checkbox" data-change="hide-others" ${S.hideOthers ? "checked" : ""}>Hide everyone else's tasks</label>` : ""}` : "";
+  const who = viewWho(sc, ev);
   return `<section class="panel"><div class="panel-head"><h2>${sc.mixOnly ? "Mixing day" : "Bake day"}</h2><span class="muted">${esc(fmtDay(parseDate(S.plan.bakeDate)))} · ${fmtT(sc.T0)} – ${fmtT(sc.end)}</span>${filter}</div>
+    ${who}
     <div class="chart-scroll"><div class="lanes">${rows}</div></div>
     <div class="legend"><span><i style="background:var(--ink)"></i>Mixing</span><span><i style="background:var(--accent-soft);border:1px solid var(--accent)"></i>Chilling</span><span><i style="background:var(--sugar-soft)"></i>Oven heating</span><span><i style="background:var(--c1)"></i>Baking</span><span><i style="background:var(--line)"></i>Cooling</span></div>
     <div>${agenda}</div></section>`;
@@ -1083,6 +1103,7 @@ document.addEventListener("click", async e => {
   else if (a === "reload-page") { await settlePlan(); location.reload(); }
   else if (a === "link-edit") { S.editLink = id; renderModal(); $("#link-input")?.focus(); }
   else if (a === "link-cancel") { S.editLink = null; renderModal(); }
+  else if (a === "who-show") { const em = el.dataset.email; if (S.bakerFilter === em) { S.bakerFilter = ""; S.hideOthers = false; } else { S.bakerFilter = em; S.hideOthers = true; } render(); }
   else if (a === "dupe-add") { S.modal.dupeOk = true; S.modal.dupeAsk = null; saveDraft($('[data-act="ed-save"]')); }
   else if (a === "dupe-filter") { S.dupeFilter = !S.dupeFilter; render(); }
   else if (a === "not-dupe") {
@@ -1137,7 +1158,8 @@ document.addEventListener("change", e => {
   const el = e.target, c = el.dataset.change;
   if (c === "baker") setBaker(el.dataset.id, el.value);
   else if (c === "owner-filter") { S.ownerFilter = el.value; render(); }
-  else if (c === "baker-filter") { S.bakerFilter = el.value; render(); }
+  else if (c === "baker-filter") { S.bakerFilter = el.value; if (!el.value) S.hideOthers = false; render(); }
+  else if (c === "hide-others") { S.hideOthers = el.checked; render(); }
   else if (c === "shop-filter") { S.shopFilter = el.value; render(); }
   else if (c === "person-name") peopleCall("PATCH", `/api/people/${encodeURIComponent(el.dataset.email)}`, { name: el.value });
   else if (el.dataset.pantry != null) { const p = curPantry(), it = p?.items[Number(el.dataset.pantry)]; if (it) { it[el.dataset.k] = el.dataset.k === "qty" ? parseQty(el.value) : el.value; savePantry(p); } }
