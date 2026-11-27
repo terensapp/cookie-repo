@@ -77,6 +77,7 @@ const HELP = {
   sheets: "How many sheets fit in one oven at a time.",
   aheadAll: "Mix any dough that keeps for a day the night before, so bake day is mostly baking. Doughs that need a long chill are always mixed the night before.",
   baker: "Who makes this cookie. Their name appears on its tasks, and they get their own task list and shopping filter.",
+  mixWhen: "When this dough is mixed. “The night before” frees up bake day for baking; doughs that chill 3 hours or more default to it. On a prebake, “here, bake at …” mixes the dough at the prebake and bakes it at the main bake.",
   mixOnly: "“Here” bakes this cookie at the prebake. “Mix only” makes the dough at the prebake and bakes it at the main bake; it moves to that day's schedule.",
   makeAhead: "What to do before bake day: doughs that need a long chill or that you chose to mix the night before.",
   ovenSharing: "Cookies that bake at the same temperature can share the oven. Different temperatures bake one after another, lowest first.",
@@ -194,7 +195,9 @@ function shopBakeIds() {
 /* Every cookie on the bakes this list covers, each with its own batch size and baker. */
 function shopSelections() {
   const all = allBakes();
-  return shopBakeIds().flatMap(id => { const b = all.find(x => x.id === id); return Object.entries(b?.selections || {}).map(([rid, v]) => ({ r: getR(rid), scale: num(v && v.scale) || 1, baker: (v && v.baker) || "", bake: b.name })).filter(x => x.r); });
+  // A cookie whose dough a prebake mixes for this bake is bought by the prebake, not again here.
+  const arriving = id => new Set(all.filter(k => k.partOf === id).flatMap(k => Object.entries(k.selections || {}).filter(([, v]) => selMixOnly(k, v)).map(([rid]) => rid)));
+  return shopBakeIds().flatMap(id => { const b = all.find(x => x.id === id), skip = arriving(id); return Object.entries(b?.selections || {}).filter(([rid]) => !skip.has(rid)).map(([rid, v]) => ({ r: getR(rid), scale: num(v && v.scale) || 1, baker: (v && v.baker) || "", bake: b.name })).filter(x => x.r); });
 }
 function applyBakes(d) {
   S.plan = { ...defaultPlan(), ...d.plan, bakeDate: d.plan?.bakeDate || defaultPlan().bakeDate };
@@ -280,7 +283,7 @@ function personSelect(id, value, attrs, label, includeNone) {
 const getR = id => S.recipes.find(r => r.id === id);
 function selectedList() {
   const main = mainBakeOf(S.plan);
-  return Object.entries(S.plan.selections || {}).map(([id, v]) => ({ r: getR(id), scale: num(v && v.scale) || 1, baker: (v && v.baker) || "", mixOnly: !!(main && (S.plan.mixOnly || (v && v.mixOnly))) })).filter(x => x.r);
+  return Object.entries(S.plan.selections || {}).map(([id, v]) => ({ r: getR(id), scale: num(v && v.scale) || 1, baker: (v && v.baker) || "", mixOnly: !!(main && (S.plan.mixOnly || (v && v.mixOnly))), mix: (v && v.mix) || "" })).filter(x => x.r);
 }
 function setBaker(id, email) { if (S.plan.selections?.[id]) { S.plan.selections[id].baker = email; savePlan(); } }
 function scaleOf(id) { return S.plan.selections?.[id] ? (num(S.plan.selections[id].scale) || 1) : (S.viewScale[id] || 1); }
@@ -320,14 +323,17 @@ function doughStorage(it, days) {
   return { how: "warn", text: `Heads up: baking is ${days} day${days > 1 ? "s" : ""} away, but this dough keeps ${it.keeps ? `only ${it.keeps} day${it.keeps > 1 ? "s" : ""}` : "no time"} and isn't marked as freezing well. Consider mixing it closer to the bake.` };
 }
 function schedule() {
-  const P = S.plan, own = selectedList(), mixOnly = isMixOnly(P), main = mainBakeOf(P), incoming = main ? [] : incomingDoughs(P);
+  const P = S.plan, mixOnly = isMixOnly(P), main = mainBakeOf(P), incoming = main ? [] : incomingDoughs(P);
+  const arriving = new Set(incoming.map(x => x.r.id));
+  const own = selectedList().filter(x => !arriving.has(x.r.id)); // also mixed at a prebake: that dough is the one baked here
   const sel = [...own, ...incoming]; if (!sel.length) return null;
   const T0 = toMin(P.start), nOv = mixOnly ? 0 : clamp(num(P.ovens) || 1, 1, 3), cap = clamp(num(P.sheetsPerOven) || 2, 1, 4), PRE = 15;
-  const items = sel.map(({ r, scale, baker, fromBake, mixOnly: mixHere }, i) => {
+  const items = sel.map(({ r, scale, baker, fromBake, mixOnly: mixHere, mix }, i) => {
     const yieldN = num(r.yieldCount) || 24, count = Math.max(1, Math.round(yieldN * scale)), per = Math.max(1, num(r.cookiesPerSheet) || 12);
     const prepBase = num(r.prepMinutes) || 20, prep = Math.round(prepBase * (scale > 1 ? 1 + (scale - 1) * 0.3 : 1));
     const chill = num(r.chillMinutes), keeps = num(r.doughKeepsDays);
-    const ahead = fromBake ? "prebake" : mixHere ? "" : chill >= 180 ? "required" : (P.aheadAll && keeps >= 1 ? "chosen" : "");
+    // Each cookie's own choice wins; otherwise long-chill doughs go the night before (and the older bake-wide setting still counts).
+    const ahead = fromBake ? "prebake" : mixHere ? "" : mix === "eve" ? (chill >= 180 ? "required" : "chosen") : mix === "day" ? "" : chill >= 180 ? "required" : (P.aheadAll && keeps >= 1 ? "chosen" : "");
     return { r, scale, baker, fromBake, mixOnly: !!mixHere, color: (i % 6) + 1, count, per, sheets: Math.ceil(count / per), prep, chill, keeps, freezable: !!r.freezable, temp: num(r.ovenTempF) || 350, bake: num(r.bakeMinutes) || 11, cool: num(r.coolMinutes) || 10, deco: num(r.decorateMinutes), ahead, lastOut: 0, firstIn: null };
   });
   const before = items.filter(it => it.ahead);
@@ -643,12 +649,14 @@ function viewPlan() {
     <label class="field"><span class="label">Start at ${help("startAt", "Start at")}</span><input type="time" id="p-start" data-change="plan" data-k="start" value="${esc(P.start)}"></label>
     ${isMixOnly(P) ? "" : `<label class="field"><span class="label">Ovens ${help("ovens", "Ovens")}</span><select id="p-ovens" data-change="plan" data-k="ovens">${[1, 2, 3].map(n => `<option ${num(P.ovens) === n ? "selected" : ""}>${n}</option>`).join("")}</select></label>
     <label class="field"><span class="label">Sheets per oven ${help("sheets", "Sheets per oven")}</span><select id="p-sheets" data-change="plan" data-k="sheetsPerOven">${[1, 2, 3, 4].map(n => `<option ${num(P.sheetsPerOven) === n ? "selected" : ""}>${n}</option>`).join("")}</select></label>
-    <label class="check"><input type="checkbox" id="p-ahead" data-change="plan" data-k="aheadAll" ${P.aheadAll ? "checked" : ""}>Mix doughs the night before when they keep ${help("aheadAll", "Mix the night before")}</label>`}
+`}
   </div></section>`;
   const others = S.bakes.length - 1;
   const head = `<div class="page-head"><div><h1>${esc(P.name || "Bake plan")}</h1><p class="muted">${!isMain ? `Prebake for ${esc(fam[0].name)} · ` : ""}${esc(fmtDay(parseDate(P.bakeDate)))}${sel.length ? ` · ${sel.length} cookie${sel.length > 1 ? "s" : ""}` : ""}</p></div>
     <button class="btn" data-act="print-page">Print / PDF</button><button class="btn" data-act="bakes">${others > 0 ? `All bakes (${S.bakes.length})` : "All bakes"}</button><button class="btn primary" data-act="bake-new">New bake</button></div>`;
   const past = P.bakeDate < isoDate(new Date()) ? `<div class="banner">This bake was on ${esc(fmtDay(parseDate(P.bakeDate)))}. Changes here update that record. Planning the next one? <button class="btn sm" data-act="bake-copy" data-id="${esc(P.id)}">Start a new bake from this one</button></div>` : "";
+  const dupHere = sc ? sc.items.filter(it => it.fromBake && P.selections?.[it.r.id]) : [];
+  const dupNote = dupHere.map(it => `<div class="banner warn">${esc(it.r.name)} is also on this bake, but its dough is mixed at ${esc(it.fromBake.name)}, so that's the batch baked here; the extra entry isn't mixed or bought twice. <button class="btn sm" data-act="toggle" data-id="${esc(it.r.id)}">Remove the extra entry</button></div>`).join("");
   const gone = Object.entries(P.selections || {}).filter(([id]) => !getR(id));
   const goneNote = gone.length ? `<p class="muted" style="font-size:.88rem">Left off this plan: ${gone.map(([, v]) => esc(v?.name || "a recipe")).join(", ")} (no longer in the recipe box).</p>` : "";
   const notes = `<section class="panel ${(P.notes || "").trim() ? "" : "no-print"}"><div class="panel-head"><h2>Notes on this bake ${help("bakeNotes", "Notes on this bake")}</h2></div><textarea id="p-notes" class="inp" rows="3" data-change="plan" data-k="notes" maxlength="5000" placeholder="How it went, what ran out, what to change next time">${esc(P.notes || "")}</textarea></section>`;
@@ -660,7 +668,11 @@ function viewPlan() {
     <div class="sel-row"><span class="dot" style="background:var(--c${it.color})"></span>
       <div style="min-width:0"><div class="nm"><a href="#" data-act="open" data-id="${esc(it.r.id)}" style="color:inherit">${esc(it.r.name)}</a></div><div class="sub">${it.count} cookies · ${it.mixOnly ? `dough only, bakes ${esc(fmtDay(parseDate(sc.main.bakeDate)))}` : `${it.sheets} sheet${it.sheets > 1 ? "s" : ""} of ${it.per} · ${it.temp}°F`}</div></div>
       <label class="who">Baker ${help("baker", "Baker")} ${personSelect(`baker-${it.r.id}`, it.baker, `class="inp" data-change="baker" data-id="${esc(it.r.id)}"`, `Baker for ${it.r.name}`, "Unassigned")}</label>
-      ${sc.main ? `<label class="who">Bake ${help("mixOnly", "Where it bakes")} <select id="mix-${esc(it.r.id)}" class="inp" data-change="sel-mixonly" data-id="${esc(it.r.id)}" aria-label="Where ${esc(it.r.name)} is baked"><option value="" ${it.mixOnly ? "" : "selected"}>here</option><option value="1" ${it.mixOnly ? "selected" : ""}>mix only, bake at ${esc(sc.main.name)}</option></select></label>` : ""}
+      ${(() => { const cur = it.mixOnly ? "mixonly" : it.ahead ? "eve" : "day";
+        return `<label class="who">Mix ${help("mixWhen", "When to mix")} <select id="mix-${esc(it.r.id)}" class="inp" data-change="sel-when" data-id="${esc(it.r.id)}" aria-label="When to mix ${esc(it.r.name)}">
+          <option value="day" ${cur === "day" ? "selected" : ""}>on bake day${it.chill >= 180 ? ` (+${fmtDur(it.chill)} chill)` : ""}</option>
+          <option value="eve" ${cur === "eve" ? "selected" : ""}>the night before</option>
+          ${sc.main ? `<option value="mixonly" ${cur === "mixonly" ? "selected" : ""}>here, bake at ${esc(sc.main.name)}</option>` : ""}</select></label>`; })()}
       ${scaleControl(it.r)}
       <button class="btn ghost sm" data-act="toggle" data-id="${esc(it.r.id)}" aria-label="Remove ${esc(it.r.name)}">Remove</button></div>`).join("")}</div>
     ${goneNote}${sc.mixOnly ? `<div class="summary"><span>Mixing done by <b>${fmtT(sc.end)}</b></span><span>Bakes <b>${esc(fmtDay(parseDate(sc.main.bakeDate)))}</b></span></div>` : ""}<div class="summary" ${sc.mixOnly ? "hidden" : ""}><span>Done by <b>${fmtT(sc.end)}</b></span><span>Oven rounds <b>${sc.rounds.length}</b></span><span>Sheet pans <b>${Math.min(sc.sheets, sc.cap * sc.nOv * 2)}</b></span></div></section>`;
@@ -675,7 +687,7 @@ function viewPlan() {
     const tonight = sc.before.filter(i => !i.fromBake).reduce((a, i) => a + i.prep, 0);
     if (tonight) ahead += `<p class="muted" style="font-size:.85rem">About ${fmtDur(tonight)} of mixing tonight.</p>`;
   } else ahead += `<p class="muted">Nothing has to happen the day before. Every dough can be mixed on bake day.</p>`;
-  if (optional.length) ahead += `<div><span class="label">Could also be made early</span>${optional.map(it => `<div class="task"><span class="when">${it.keeps >= 1 ? `≤ ${it.keeps} day${it.keeps > 1 ? "s" : ""}` : "freezer"}</span><p>${esc(it.r.name)}${it.freezable ? " · dough freezes well" : ""}</p>${it.r.makeAheadTip ? `<span class="sub">${esc(it.r.makeAheadTip)}</span>` : ""}</div>`).join("")}</div>`;
+  if (optional.length) ahead += `<div><span class="label">Could also be mixed early</span><p class="muted" style="font-size:.85rem">Set <b>Mix</b> to “the night before” on the cookie above.</p>${optional.map(it => `<div class="task"><span class="when">${it.keeps >= 1 ? `≤ ${it.keeps} day${it.keeps > 1 ? "s" : ""}` : "freezer"}</span><p>${esc(it.r.name)}${it.freezable ? " · dough freezes well" : ""}</p>${it.r.makeAheadTip ? `<span class="sub">${esc(it.r.makeAheadTip)}</span>` : ""}</div>`).join("")}</div>`;
   ahead += `</section>`;
 
   // oven sharing
@@ -697,8 +709,8 @@ function viewPlan() {
       <p class="muted" style="font-size:.88rem">${sc.mixOnly ? "These doughs" : "The mix-only doughs"} bake on ${esc(sc.main.name)} day, ${sc.days} day${sc.days === 1 ? "" : "s"} after mixing, and show up on its schedule.</p>
       ${sc.stored.map(it => `<div class="task ${it.store.how === "warn" ? "warn" : ""}"><span class="when">${it.store.how === "freezer" ? "Freeze" : it.store.how === "warn" ? "Check" : "Fridge"}</span><p><b>${esc(it.r.name)}</b>${bakerTag(it)}</p><span class="sub">${esc(it.store.text)}</span></div>`).join("")}
       <button class="btn sm" data-act="bake-open" data-id="${esc(sc.main.id)}" style="align-self:flex-start">Open ${esc(sc.main.name)}</button></section>` : "";
-  if (sc.mixOnly) return head + tabsRow + past + settings + picked + store + reminders + viewTimeline(sc) + notes;
-  return head + tabsRow + past + settings + picked + store + `<div class="two">${ahead}${share}</div>` + reminders + viewTimeline(sc) + notes;
+  if (sc.mixOnly) return head + tabsRow + past + dupNote + settings + picked + store + reminders + viewTimeline(sc) + notes;
+  return head + tabsRow + past + dupNote + settings + picked + store + `<div class="two">${ahead}${share}</div>` + reminders + viewTimeline(sc) + notes;
 }
 /* Who's doing what on the day: each baker's cookies, sheets, mixing time and busy window. */
 const bakerTag = it => it.baker ? `<span class="baker">${esc(personName(it.baker))}</span>` : "";
@@ -1263,10 +1275,15 @@ document.addEventListener("change", e => {
   const el = e.target, c = el.dataset.change;
   if (c === "baker") setBaker(el.dataset.id, el.value);
   else if (c === "owner-filter") { S.ownerFilter = el.value; render(); }
-  else if (c === "sel-mixonly") {
+  else if (c === "sel-when") {
     const P = S.plan;
-    if (P.mixOnly) { for (const v of Object.values(P.selections || {})) v.mixOnly = true; P.mixOnly = false; }
-    const v = P.selections?.[el.dataset.id]; if (v) { v.mixOnly = el.value === "1"; savePlan(); }
+    // Older bake-wide settings become per-cookie the first time one cookie is changed, so the others keep what they had.
+    if (P.mixOnly || P.aheadAll) {
+      const sc = schedule();
+      for (const [id, v] of Object.entries(P.selections || {})) { const it = sc?.items.find(i => i.r.id === id && !i.fromBake); if (it) { v.mixOnly = it.mixOnly; v.mix = it.mixOnly ? "" : it.ahead ? "eve" : "day"; } }
+      P.mixOnly = false; P.aheadAll = false;
+    }
+    const v = P.selections?.[el.dataset.id]; if (v) { v.mixOnly = el.value === "mixonly"; v.mix = el.value === "mixonly" ? "" : el.value; savePlan(); }
   }
   else if (c === "baker-filter") { S.bakerFilter = el.value; if (!el.value) S.hideOthers = false; render(); }
   else if (c === "hide-others") { S.hideOthers = el.checked; render(); }
